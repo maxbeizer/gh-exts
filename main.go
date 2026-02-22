@@ -217,17 +217,40 @@ func getExtensions() []Extension {
 	return exts
 }
 
+// fuzzyMatch returns extensions whose name contains the query (case-insensitive).
+// It strips the leading "gh-" prefix from names before matching so that
+// e.g. "contrib" matches "gh-contrib".
+func fuzzyMatch(exts []Extension, query string) []Extension {
+	q := strings.ToLower(query)
+	var matches []Extension
+	for _, ext := range exts {
+		name := strings.ToLower(ext.Name)
+		// Strip common "gh " or "gh-" prefixes for matching.
+		bare := strings.TrimPrefix(strings.TrimPrefix(name, "gh "), "gh-")
+		if strings.Contains(bare, q) || strings.Contains(name, q) {
+			matches = append(matches, ext)
+		}
+	}
+	return matches
+}
+
 func usage() {
 	fmt.Printf(`gh-exts v%s — Your extensions, in depth
 
 Usage:
   gh exts              Interactive extension browser
+  gh exts <name>       Jump directly to the detail view for <name>
   gh exts -h           Show help
   gh exts -v           Show version
+
+The <name> argument is fuzzy-matched against installed extensions.
+If exactly one extension matches, its README is shown immediately.
+If multiple extensions match, the picker opens pre-filtered.
 `, version)
 }
 
 func main() {
+	var query string
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "-h", "--help", "help":
@@ -236,6 +259,8 @@ func main() {
 		case "-v", "--version", "version":
 			fmt.Printf("gh-exts v%s\n", version)
 			return
+		default:
+			query = os.Args[1]
 		}
 	}
 
@@ -245,14 +270,50 @@ func main() {
 		return
 	}
 
-	items := make([]list.Item, len(exts))
-	for i, e := range exts {
+	// If a positional argument was given, fuzzy-match against installed extensions.
+	displayExts := exts
+	if query != "" {
+		matches := fuzzyMatch(exts, query)
+		switch len(matches) {
+		case 0:
+			fmt.Fprintf(os.Stderr, "No installed extension matches %q.\nRun 'gh exts' to see all extensions.\n", query)
+			os.Exit(1)
+		case 1:
+			// Exactly one match — jump straight to detail view.
+			items := make([]list.Item, len(exts))
+			for i, e := range exts {
+				items[i] = e
+			}
+			delegate := list.NewDefaultDelegate()
+			l := list.New(items, delegate, 80, 24)
+			l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(exts))
+			l.SetShowStatusBar(true)
+			l.SetFilteringEnabled(true)
+
+			m := model{list: l}
+			p := tea.NewProgram(m, tea.WithAltScreen())
+			// Send a command to fetch the README immediately on start.
+			go func() {
+				p.Send(fetchReadme(matches[0])())
+			}()
+			if _, err := p.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		default:
+			displayExts = matches
+		}
+	}
+
+	items := make([]list.Item, len(displayExts))
+	for i, e := range displayExts {
 		items[i] = e
 	}
 
 	delegate := list.NewDefaultDelegate()
 	l := list.New(items, delegate, 80, 24)
-	l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(exts))
+	l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(displayExts))
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 
