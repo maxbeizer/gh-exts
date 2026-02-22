@@ -218,7 +218,7 @@ func getExtensions() []Extension {
 }
 
 func usage() {
-	fmt.Printf(`gh-exts v%s — Your extensions, but useful
+	fmt.Printf(`gh-exts v%s — Your extensions, in depth
 
 Usage:
   gh exts              Interactive extension browser

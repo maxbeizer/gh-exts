@@ -1,6 +1,6 @@
 # gh-exts
 
-Your extensions, but useful. An interactive browser for your installed `gh` extensions.
+Your extensions, in depth. An interactive browser for your installed `gh` extensions.
 
 ![demo](demo.gif)
 
@@ -25,7 +25,7 @@ gh exts -v           # show version
 3. Press `Enter` to view the full README (rendered with glamour)
 4. Press `Esc` to go back, `q` to quit
 
-Basically `gh extension list` but actually useful.
+Basically `gh extension list` but with depth.
 
 ## Uninstall
 
