@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -19,6 +20,16 @@ import (
 )
 
 const version = "0.3.0"
+
+// gh-native color palette
+var (
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
+	boldStyle    = lipgloss.NewStyle().Bold(true)
+	greenStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950"))
+	yellowStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#d29922"))
+	cyanStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#58a6ff"))
+	redStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149"))
+)
 
 // HealthInfo holds repository health metadata for an extension.
 type HealthInfo struct {
@@ -38,52 +49,27 @@ type Extension struct {
 	Health        *HealthInfo // nil until fetched
 }
 
-func (e Extension) Title() string {
-	if e.Repo != "" {
-		return e.Name + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(e.Repo)
-	}
-	return e.Name + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(local)")
-}
+func (e Extension) Title() string       { return e.Name }
+func (e Extension) FilterValue() string { return e.Name + " " + e.Repo }
 
 func (e Extension) Description() string {
 	var parts []string
 
-	// Health indicators (#7)
-	if e.Health != nil {
-		if e.Health.Archived {
-			parts = append(parts, "🗄️ archived")
-		}
-		if !e.Health.PushedAt.IsZero() && e.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
-			parts = append(parts, "⚠️ stale")
-		}
-		parts = append(parts, fmt.Sprintf("★ %d", e.Health.Stars))
+	if e.Repo != "" {
+		parts = append(parts, e.Repo)
+	} else {
+		parts = append(parts, "local")
 	}
 
-	// Version + update indicator (#2)
 	if e.Version != "" {
-		if e.LatestVersion != "" && e.Version != e.LatestVersion {
-			parts = append(parts, e.Version+" → "+e.LatestVersion+" available")
-		} else if e.LatestVersion != "" {
-			parts = append(parts, e.Version+" ✓ latest")
-		} else {
-			parts = append(parts, e.Version)
-		}
-	} else if e.Repo == "" {
-		parts = append(parts, "local dev")
+		parts = append(parts, e.Version)
 	}
 
-	if len(parts) == 0 {
-		return ""
-	}
-	return strings.Join(parts, "  ")
+	return strings.Join(parts, " · ")
 }
 
 func (e Extension) HasUpdate() bool {
 	return e.Version != "" && e.LatestVersion != "" && e.Version != e.LatestVersion
-}
-
-func (e Extension) FilterValue() string {
-	return e.Name + " " + e.Repo
 }
 
 // RepoInfo holds metadata fetched from the GitHub API for the detail view header.
@@ -107,22 +93,16 @@ type BrowseExtension struct {
 	Installed bool
 }
 
-func (b BrowseExtension) Title() string {
-	title := b.FullName
-	if b.Installed {
-		title += "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[installed]")
-	}
-	return title
-}
+func (b BrowseExtension) Title() string       { return b.FullName }
+func (b BrowseExtension) FilterValue() string { return b.FullName + " " + b.Desc }
+
 func (b BrowseExtension) Description() string {
-	star := fmt.Sprintf("★ %d", b.Stars)
+	var parts []string
 	if b.Desc != "" {
-		return b.Desc + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(star)
+		parts = append(parts, b.Desc)
 	}
-	return star
-}
-func (b BrowseExtension) FilterValue() string {
-	return b.FullName + " " + b.Desc
+	parts = append(parts, fmt.Sprintf("★ %d", b.Stars))
+	return strings.Join(parts, " · ")
 }
 
 // Release represents a GitHub release.
@@ -189,6 +169,107 @@ const (
 	detailView
 	changelogView
 )
+
+// ghDelegate renders list items in a minimal gh-CLI style.
+type ghDelegate struct {
+	extensions []Extension // for health/version enrichment on installed items
+}
+
+func (d ghDelegate) Height() int                               { return 2 }
+func (d ghDelegate) Spacing() int                              { return 0 }
+func (d ghDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd   { return nil }
+
+func (d ghDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	selected := index == m.Index()
+	cursor := "  "
+	if selected {
+		cursor = greenStyle.Render("▸ ")
+	}
+
+	switch it := item.(type) {
+	case Extension:
+		// Enrich with health/version data from model's extensions slice
+		for _, ext := range d.extensions {
+			if ext.Name == it.Name {
+				it = ext
+				break
+			}
+		}
+
+		name := it.Name
+		if selected {
+			name = boldStyle.Render(name)
+		}
+
+		// Build metadata parts
+		var meta []string
+		if it.Repo != "" {
+			meta = append(meta, it.Repo)
+		} else {
+			meta = append(meta, "local")
+		}
+		if it.Version != "" {
+			meta = append(meta, it.Version)
+		}
+		if it.Health != nil {
+			if it.Health.Stars > 0 {
+				meta = append(meta, fmt.Sprintf("★%d", it.Health.Stars))
+			}
+			if it.Health.Archived {
+				meta = append(meta, redStyle.Render("archived"))
+			} else if !it.Health.PushedAt.IsZero() && it.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
+				meta = append(meta, yellowStyle.Render("stale"))
+			}
+		}
+		if it.HasUpdate() {
+			meta = append(meta, yellowStyle.Render("↑ "+it.LatestVersion))
+		}
+
+		metaStr := dimStyle.Render(strings.Join(meta, " · "))
+		fmt.Fprintf(w, "%s%s\n  %s\n", cursor, name, metaStr)
+
+	case BrowseExtension:
+		name := it.FullName
+		if selected {
+			name = boldStyle.Render(name)
+		}
+		var meta []string
+		meta = append(meta, fmt.Sprintf("★%d", it.Stars))
+		if it.Installed {
+			meta = append(meta, greenStyle.Render("installed"))
+		}
+		if it.Desc != "" {
+			// Truncate description to fit
+			desc := it.Desc
+			if len(desc) > 60 {
+				desc = desc[:57] + "…"
+			}
+			meta = append(meta, desc)
+		}
+		metaStr := dimStyle.Render(strings.Join(meta, " · "))
+		fmt.Fprintf(w, "%s%s\n  %s\n", cursor, name, metaStr)
+	}
+}
+
+// newStyledList creates a list with gh-native styling.
+func newStyledList(items []list.Item, title string, exts []Extension) list.Model {
+	d := ghDelegate{extensions: exts}
+	l := list.New(items, d, 80, 24)
+	l.Title = title
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(true)
+	l.SetShowHelp(true)
+
+	// gh-native title style: plain bold, no background
+	l.Styles.Title = boldStyle
+	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 0)
+
+	// Minimal filter styling
+	l.Styles.FilterPrompt = cyanStyle
+	l.Styles.FilterCursor = cyanStyle
+
+	return l
+}
 
 type model struct {
 	list          list.Model
@@ -438,28 +519,30 @@ func (m *model) rebuildList() tea.Cmd {
 		}
 		items = append(items, ext)
 	}
-	m.list.Title = fmt.Sprintf("gh exts — %d extension(s)", len(items))
+	title := fmt.Sprintf("Showing %d extension(s)", len(items))
+	if m.outdatedOnly {
+		title = fmt.Sprintf("Showing %d extension(s) with updates", len(items))
+	}
+	m.list.Title = title
+	m.list.SetDelegate(ghDelegate{extensions: m.extensions})
 	return m.list.SetItems(items)
 }
 
 func (m model) View() string {
 	if m.current == changelogView {
-		header := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("212")).
-			Render(m.extName+" — Changelog") +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  (esc to go back)")
+		header := boldStyle.Render(m.extName+" — Changelog") +
+			dimStyle.Render("  esc to go back")
 		return lipgloss.NewStyle().Margin(1, 2).Render(header + "\n\n" + m.viewport.View())
 	}
 	if m.current == detailView {
 		hints := "esc to go back"
 		if !m.browseMode {
-			hints += " · c for changelog"
+			hints += " · c changelog"
 		}
-		hint := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(hints)
-		return lipgloss.NewStyle().Margin(1, 2).Render(hint + "\n\n" + m.viewport.View())
+		hint := dimStyle.Render(hints)
+		return lipgloss.NewStyle().Margin(1, 2).Render(hint + "\n" + m.viewport.View())
 	}
-	return lipgloss.NewStyle().Margin(1, 2).Render(m.list.View())
+	return lipgloss.NewStyle().Margin(0, 2).Render(m.list.View())
 }
 
 // --- commands ---
@@ -476,47 +559,48 @@ func fetchRepoInfo(repo string) *RepoInfo {
 	return &info
 }
 
+// formatRepoHeader renders metadata in gh repo view style.
 func formatRepoHeader(ext Extension, info *RepoInfo) string {
-	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	cyanStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	yellowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-
 	if info == nil {
-		return nameStyle.Render(ext.Name) + "\n" + dimStyle.Render("Local extension")
+		return boldStyle.Render(ext.Name) + "\n" + dimStyle.Render("Local extension") + "\n--"
 	}
 
 	var lines []string
 
-	title := nameStyle.Render(ext.Name)
-	if info.Archived {
-		title += " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Render("[archived]")
-	}
-	lines = append(lines, title)
+	// name: owner/repo  (like gh repo view)
+	lines = append(lines, dimStyle.Render("name:")+"\t"+boldStyle.Render(ext.Repo))
 
 	if info.Description != "" {
-		lines = append(lines, info.Description)
+		lines = append(lines, dimStyle.Render("about:")+"\t"+info.Description)
 	}
 
+	// metadata line
 	var meta []string
-	meta = append(meta, yellowStyle.Render(fmt.Sprintf("★ %d", info.Stars)))
+	meta = append(meta, fmt.Sprintf("★ %d", info.Stars))
 	if info.Language != "" {
-		meta = append(meta, cyanStyle.Render(info.Language))
+		meta = append(meta, info.Language)
 	}
 	if info.License != nil && info.License.SPDX != "" && info.License.SPDX != "NOASSERTION" {
 		meta = append(meta, info.License.SPDX)
 	}
-	lines = append(lines, strings.Join(meta, dimStyle.Render(" · ")))
+	if ext.Version != "" {
+		meta = append(meta, ext.Version)
+	}
+	lines = append(lines, dimStyle.Render("info:")+"\t"+strings.Join(meta, dimStyle.Render(" · ")))
 
-	if info.HTMLURL != "" {
-		lines = append(lines, dimStyle.Render(info.HTMLURL))
+	if info.Archived {
+		lines = append(lines, dimStyle.Render("status:")+"\t"+redStyle.Render("archived"))
 	}
 	if info.UpdatedAt != "" {
 		if t, err := time.Parse(time.RFC3339, info.UpdatedAt); err == nil {
-			lines = append(lines, dimStyle.Render("Updated "+t.Format("Jan 2, 2006")))
+			lines = append(lines, dimStyle.Render("updated:")+"\t"+t.Format("Jan 2, 2006"))
 		}
 	}
+	if ext.LatestVersion != "" && ext.Version != ext.LatestVersion {
+		lines = append(lines, dimStyle.Render("update:")+"\t"+yellowStyle.Render(ext.Version+" → "+ext.LatestVersion))
+	}
 
+	lines = append(lines, "--")
 	return strings.Join(lines, "\n")
 }
 
@@ -976,6 +1060,14 @@ Keys (browse mode):
 `, version)
 }
 
+func extHelpKeys() []key.Binding {
+	return []key.Binding{
+		key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "update")),
+		key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "update all")),
+		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+	}
+}
+
 func main() {
 	var query string
 	outdated := false
@@ -1020,11 +1112,7 @@ func main() {
 			items[i] = b
 		}
 
-		delegate := list.NewDefaultDelegate()
-		l := list.New(items, delegate, 80, 24)
-		l.Title = fmt.Sprintf("gh exts --browse — %d extension(s)  (i=install, enter=readme)", len(browse))
-		l.SetShowStatusBar(true)
-		l.SetFilteringEnabled(true)
+		l := newStyledList(items, fmt.Sprintf("Browse extensions · %d found · i install · enter readme", len(browse)), nil)
 
 		m := model{list: l, browseMode: true}
 
@@ -1055,19 +1143,8 @@ func main() {
 			for i, e := range installed {
 				items[i] = e
 			}
-			delegate := list.NewDefaultDelegate()
-			l := list.New(items, delegate, 80, 24)
-			l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(installed))
-			l.SetShowStatusBar(true)
-			l.SetFilteringEnabled(true)
-			l.AdditionalShortHelpKeys = func() []key.Binding {
-				return []key.Binding{
-					key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "update")),
-					key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "update all")),
-					key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
-					key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view readme")),
-				}
-			}
+			l := newStyledList(items, fmt.Sprintf("Showing %d extension(s)", len(installed)), installed)
+			l.AdditionalShortHelpKeys = extHelpKeys
 
 			m := model{list: l, extensions: installed, outdatedOnly: outdated}
 			p := tea.NewProgram(m, tea.WithAltScreen())
@@ -1089,23 +1166,12 @@ func main() {
 		items[i] = e
 	}
 
-	delegate := list.NewDefaultDelegate()
-	l := list.New(items, delegate, 80, 24)
-	title := fmt.Sprintf("gh exts — %d extension(s)", len(displayExts))
+	title := fmt.Sprintf("Showing %d extension(s)", len(displayExts))
 	if outdated {
-		title = "gh exts — checking for updates…"
+		title = "Checking for updates…"
 	}
-	l.Title = title
-	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(true)
-	l.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{
-			key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "update")),
-			key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "update all")),
-			key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
-			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view readme")),
-		}
-	}
+	l := newStyledList(items, title, installed)
+	l.AdditionalShortHelpKeys = extHelpKeys
 
 	m := model{list: l, extensions: installed, outdatedOnly: outdated}
 
