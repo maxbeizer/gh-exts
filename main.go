@@ -214,6 +214,8 @@ type model struct {
 	browseMode    bool
 	statusMsg     string
 	confirmRemove bool
+	updating      map[string]bool // names of extensions currently being updated
+	updatingAll   bool
 	width         int
 	height        int
 	ready         bool
@@ -365,12 +367,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u":
 			if m.current == listView && !m.browseMode {
 				if it := m.selectedItem(); it != nil && it.ext != nil {
+					if m.updating == nil {
+						m.updating = make(map[string]bool)
+					}
+					m.updating[it.ext.Name] = true
 					m.statusMsg = "Updating " + it.ext.Name + "…"
 					return m, updateExtension(*it.ext)
 				}
 			}
 		case "U":
 			if m.current == listView && !m.browseMode {
+				m.updatingAll = true
+				if m.updating == nil {
+					m.updating = make(map[string]bool)
+				}
+				for _, ext := range m.extensions {
+					if ext.Repo != "" {
+						m.updating[ext.Name] = true
+					}
+				}
 				m.statusMsg = "Updating all extensions…"
 				return m, updateAllExtensions()
 			}
@@ -469,6 +484,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case updateMsg:
+		delete(m.updating, msg.ext.Name)
 		if msg.err != nil {
 			m.statusMsg = redStyle.Render("✗") + " Update failed: " + msg.err.Error()
 		} else {
@@ -496,11 +512,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case updateAllMsg:
+		m.updatingAll = false
+		m.updating = nil
 		if msg.err != nil {
 			m.statusMsg = redStyle.Render("✗") + " Update all failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = greenStyle.Render("✓") + " All extensions updated"
-			// Refresh the extension list to pick up new versions.
 			m.extensions = getExtensions()
 			m.rebuildItems()
 			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
@@ -638,6 +655,11 @@ func (m model) renderExtItem(ext Extension, selected bool) string {
 	name := ext.Name
 	if selected {
 		name = boldStyle.Render(name)
+	}
+
+	// Show updating indicator
+	if m.updating[ext.Name] {
+		return name + "  " + yellowStyle.Render("↻ updating…")
 	}
 
 	var meta []string
