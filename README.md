@@ -24,7 +24,7 @@ gh exts -v           # show version
 
 1. Lists all your installed extensions in a filterable picker
 2. Type `/` to search/filter by name
-3. Press `Enter` to view the full README (rendered with glamour)
+3. Press `Enter` to view repo metadata (stars, language, license, description) and the full README
 4. Press `Esc` to go back, `q` to quit
 
 Basically `gh extension list` but with depth.

@@ -41,11 +41,25 @@ func (e Extension) FilterValue() string {
 	return e.Name + " " + e.Repo
 }
 
+// RepoInfo holds metadata fetched from the GitHub API.
+type RepoInfo struct {
+	Description    string `json:"description"`
+	Stars          int    `json:"stargazers_count"`
+	Language       string `json:"language"`
+	License        *struct {
+		SPDX string `json:"spdx_id"`
+	} `json:"license"`
+	Archived  bool   `json:"archived"`
+	HTMLURL   string `json:"html_url"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 // --- messages ---
 
 type readmeMsg struct {
-	content string
-	ext     Extension
+	content  string
+	ext      Extension
+	repoInfo *RepoInfo
 }
 
 type errMsg struct{ err error }
@@ -111,7 +125,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case readmeMsg:
-		m.readme = msg.content
+		header := formatRepoHeader(msg.ext, msg.repoInfo)
+		m.readme = header + "\n\n" + msg.content
 		m.extName = msg.ext.Name
 		m.current = detailView
 		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
@@ -141,17 +156,69 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	if m.current == detailView {
-		header := lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("212")).
-			Render(m.extName) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  (esc to go back)")
-		return lipgloss.NewStyle().Margin(1, 2).Render(header+"\n\n"+m.viewport.View())
+		hint := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("esc to go back")
+		return lipgloss.NewStyle().Margin(1, 2).Render(hint+"\n\n"+m.viewport.View())
 	}
 	return lipgloss.NewStyle().Margin(1, 2).Render(m.list.View())
 }
 
 // --- commands ---
+
+func fetchRepoInfo(repo string) *RepoInfo {
+	out, err := exec.Command("gh", "api", "repos/"+repo).Output()
+	if err != nil {
+		return nil
+	}
+	var info RepoInfo
+	if err := json.Unmarshal(out, &info); err != nil {
+		return nil
+	}
+	return &info
+}
+
+func formatRepoHeader(ext Extension, info *RepoInfo) string {
+	nameStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	cyanStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	yellowStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+
+	if info == nil {
+		return nameStyle.Render(ext.Name) + "\n" + dimStyle.Render("Local extension")
+	}
+
+	var lines []string
+
+	title := nameStyle.Render(ext.Name)
+	if info.Archived {
+		title += " " + lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Render("[archived]")
+	}
+	lines = append(lines, title)
+
+	if info.Description != "" {
+		lines = append(lines, info.Description)
+	}
+
+	var meta []string
+	meta = append(meta, yellowStyle.Render(fmt.Sprintf("★ %d", info.Stars)))
+	if info.Language != "" {
+		meta = append(meta, cyanStyle.Render(info.Language))
+	}
+	if info.License != nil && info.License.SPDX != "" && info.License.SPDX != "NOASSERTION" {
+		meta = append(meta, info.License.SPDX)
+	}
+	lines = append(lines, strings.Join(meta, dimStyle.Render(" · ")))
+
+	if info.HTMLURL != "" {
+		lines = append(lines, dimStyle.Render(info.HTMLURL))
+	}
+	if info.UpdatedAt != "" {
+		if t, err := time.Parse(time.RFC3339, info.UpdatedAt); err == nil {
+			lines = append(lines, dimStyle.Render("Updated "+t.Format("Jan 2, 2006")))
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
 
 func fetchReadme(ext Extension) tea.Cmd {
 	return func() tea.Msg {
@@ -163,12 +230,15 @@ func fetchReadme(ext Extension) tea.Cmd {
 			}
 		}
 
+		info := fetchRepoInfo(repo)
+
 		out, err := exec.Command("gh", "api", "repos/"+repo+"/readme",
 			"--jq", ".content").Output()
 		if err != nil {
 			return readmeMsg{
-				content: "No README found for " + repo,
-				ext:     ext,
+				content:  "No README found for " + repo,
+				ext:      ext,
+				repoInfo: info,
 			}
 		}
 
@@ -179,11 +249,10 @@ func fetchReadme(ext Extension) tea.Cmd {
 
 		rendered, err := glamour.Render(string(decoded), "dark")
 		if err != nil {
-			// Fall back to raw markdown.
-			return readmeMsg{content: string(decoded), ext: ext}
+			return readmeMsg{content: string(decoded), ext: ext, repoInfo: info}
 		}
 
-		return readmeMsg{content: rendered, ext: ext}
+		return readmeMsg{content: rendered, ext: ext, repoInfo: info}
 	}
 }
 
