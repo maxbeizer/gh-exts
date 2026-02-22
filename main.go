@@ -709,9 +709,6 @@ func (m model) renderExtItem(ext Extension, selected bool) string {
 	}
 	if ext.Health != nil && ext.Health.Archived {
 		meta = append(meta, redStyle.Render("archived"))
-	} else if ext.Health != nil && !ext.Health.PushedAt.IsZero() &&
-		ext.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
-		meta = append(meta, yellowStyle.Render("stale"))
 	}
 	if ext.HasUpdate() {
 		meta = append(meta, yellowStyle.Render("↑"+ext.LatestVersion))
