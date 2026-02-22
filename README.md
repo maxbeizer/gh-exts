@@ -69,6 +69,7 @@ gh exts --export-json > exts.json    # JSON manifest
 | `u`     | Update selected extension               |
 | `U`     | Update all extensions                   |
 | `x`     | Remove selected extension (confirm)     |
+| `p`     | Prune all archived extensions            |
 | `/`     | Search / filter by name                 |
 | `Esc`   | Go back                                 |
 | `q`     | Quit                                    |
@@ -85,8 +86,8 @@ gh exts --export-json > exts.json    # JSON manifest
 
 ## Features
 
-- **Health indicators** — each extension shows ★ stars, 🗄️ archived, and ⚠️ stale warnings in the list
-- **Update checks** — shows `v1.0 → v1.1 available` or `v1.0 ✓ latest` next to each extension
+- **Health indicators** — each extension shows ★ stars and archived status
+- **Update checks** — shows `↑v1.1` when a newer release is available
 - **Repo metadata** — detail view header shows description, stars, language, license, last updated
 - **Changelog** — press `c` to see releases newer than your installed version
 - **Manage** — update (`u`), update all (`U`), or remove (`x`) extensions without leaving the TUI
