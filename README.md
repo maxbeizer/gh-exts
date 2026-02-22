@@ -23,11 +23,16 @@ gh exts -v           # show version
 ## How It Works
 
 1. Lists all your installed extensions in a filterable picker
-2. Type `/` to search/filter by name
-3. Press `Enter` to view the full README (rendered with glamour)
-4. Press `Esc` to go back, `q` to quit
+2. Shows health indicators for each extension:
+   - 🗄️ if the repository is archived
+   - ⚠️ if there has been no push in 6+ months (stale)
+   - ★ star count
+   - Current version
+3. Type `/` to search/filter by name
+4. Press `Enter` to view the full README (rendered with glamour)
+5. Press `Esc` to go back, `q` to quit
 
-Basically `gh extension list` but with depth.
+Health metadata is fetched concurrently on startup via `gh api`.
 
 ## Uninstall
 

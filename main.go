@@ -18,11 +18,21 @@ import (
 
 const version = "0.2.0"
 
+// HealthInfo holds repository health metadata for an extension.
+type HealthInfo struct {
+	Archived   bool
+	PushedAt   time.Time
+	Stars      int
+	Forks      int
+	OpenIssues int
+}
+
 // Extension represents a single installed gh extension.
 type Extension struct {
-	Name    string // e.g. "gh agent-viz"
-	Repo    string // e.g. "maxbeizer/gh-agent-viz" (may be empty for local)
-	Version string // e.g. "v0.4.0" (may be empty)
+	Name    string      // e.g. "gh agent-viz"
+	Repo    string      // e.g. "maxbeizer/gh-agent-viz" (may be empty for local)
+	Version string      // e.g. "v0.4.0" (may be empty)
+	Health  *HealthInfo // nil until fetched
 }
 
 func (e Extension) Title() string {
@@ -32,10 +42,28 @@ func (e Extension) Title() string {
 	return e.Name + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(local)")
 }
 func (e Extension) Description() string {
-	if e.Version != "" {
-		return e.Version
+	var parts []string
+
+	if e.Health != nil {
+		if e.Health.Archived {
+			parts = append(parts, "🗄️ archived")
+		}
+		if !e.Health.PushedAt.IsZero() && e.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
+			parts = append(parts, "⚠️ stale")
+		}
+		parts = append(parts, fmt.Sprintf("★ %d", e.Health.Stars))
 	}
-	return "local dev"
+
+	if e.Version != "" {
+		parts = append(parts, e.Version)
+	} else if e.Repo == "" {
+		parts = append(parts, "local dev")
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "  ")
 }
 func (e Extension) FilterValue() string {
 	return e.Name + " " + e.Repo
@@ -46,6 +74,10 @@ func (e Extension) FilterValue() string {
 type readmeMsg struct {
 	content string
 	ext     Extension
+}
+
+type healthMsg struct {
+	data map[string]HealthInfo
 }
 
 type errMsg struct{ err error }
@@ -68,10 +100,11 @@ type model struct {
 	width    int
 	height   int
 	ready    bool
+	exts     []Extension // stored to rebuild items after health fetch
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return fetchHealth(m.exts)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -119,6 +152,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.readme)
 		m.ready = true
 		return m, nil
+
+	case healthMsg:
+		for i, ext := range m.exts {
+			if h, ok := msg.data[ext.Repo]; ok {
+				m.exts[i].Health = &h
+			}
+		}
+		items := make([]list.Item, len(m.exts))
+		for i, e := range m.exts {
+			items[i] = e
+		}
+		cmd := m.list.SetItems(items)
+		return m, cmd
 
 	case errMsg:
 		m.readme = fmt.Sprintf("Error: %v", msg.err)
@@ -184,6 +230,43 @@ func fetchReadme(ext Extension) tea.Cmd {
 		}
 
 		return readmeMsg{content: rendered, ext: ext}
+	}
+}
+
+func fetchHealth(exts []Extension) tea.Cmd {
+	return func() tea.Msg {
+		result := make(map[string]HealthInfo)
+		for _, ext := range exts {
+			if ext.Repo == "" {
+				continue
+			}
+			out, err := exec.Command("gh", "api", "repos/"+ext.Repo,
+				"--jq", `{archived, pushed_at, stargazers_count, forks_count, open_issues_count}`).Output()
+			if err != nil {
+				continue
+			}
+			var raw struct {
+				Archived   bool   `json:"archived"`
+				PushedAt   string `json:"pushed_at"`
+				Stars      int    `json:"stargazers_count"`
+				Forks      int    `json:"forks_count"`
+				OpenIssues int    `json:"open_issues_count"`
+			}
+			if err := json.Unmarshal(out, &raw); err != nil {
+				continue
+			}
+			h := HealthInfo{
+				Archived:   raw.Archived,
+				Stars:      raw.Stars,
+				Forks:      raw.Forks,
+				OpenIssues: raw.OpenIssues,
+			}
+			if t, err := time.Parse(time.RFC3339, raw.PushedAt); err == nil {
+				h.PushedAt = t
+			}
+			result[ext.Repo] = h
+		}
+		return healthMsg{data: result}
 	}
 }
 
@@ -308,7 +391,7 @@ func main() {
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 
-	m := model{list: l}
+	m := model{list: l, exts: exts}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
