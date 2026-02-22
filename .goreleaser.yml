@@ -2,7 +2,8 @@ version: 2
 
 builds:
   - main: ./main.go
-    binary: gh-exts
+    binary: "{{ .Os }}-{{ .Arch }}"
+    no_unique_dist_dir: true
     goos:
       - linux
       - darwin
@@ -12,10 +13,7 @@ builds:
       - arm64
 
 archives:
-  - formats: ['tar.gz']
-    format_overrides:
-      - goos: windows
-        formats: ['zip']
+  - format: binary
 
 release:
   draft: false
