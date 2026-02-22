@@ -27,6 +27,16 @@ gh exts -v           # show version
 3. Press `Enter` to view the full README (rendered with glamour)
 4. Press `Esc` to go back, `q` to quit
 
+### Extension Management
+
+| Key | Action |
+|-----|--------|
+| `u` | Update the selected extension |
+| `U` | Update all extensions |
+| `x` | Remove the selected extension (press again to confirm) |
+
+After each operation a status message appears in the list bar.
+
 Basically `gh extension list` but with depth.
 
 ## Uninstall

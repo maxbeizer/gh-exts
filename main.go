@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,7 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 // Extension represents a single installed gh extension.
 type Extension struct {
@@ -48,6 +49,20 @@ type readmeMsg struct {
 	ext     Extension
 }
 
+type updateMsg struct {
+	ext Extension
+	err error
+}
+
+type removeMsg struct {
+	ext Extension
+	err error
+}
+
+type updateAllMsg struct {
+	err error
+}
+
 type errMsg struct{ err error }
 
 // --- model ---
@@ -60,14 +75,15 @@ const (
 )
 
 type model struct {
-	list     list.Model
-	viewport viewport.Model
-	current  view
-	readme   string
-	extName  string
-	width    int
-	height   int
-	ready    bool
+	list          list.Model
+	viewport      viewport.Model
+	current       view
+	readme        string
+	extName       string
+	width         int
+	height        int
+	ready         bool
+	confirmRemove bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -84,6 +100,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Handle confirm-remove state.
+		if m.confirmRemove {
+			m.confirmRemove = false
+			if msg.String() == "x" || msg.String() == "y" {
+				if item, ok := m.list.SelectedItem().(Extension); ok {
+					m.list.NewStatusMessage("Removing " + item.Name + "…")
+					return m, removeExtension(item)
+				}
+			}
+			m.list.NewStatusMessage("Remove cancelled.")
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
@@ -96,6 +125,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc", "backspace":
 			if m.current == detailView {
 				m.current = listView
+				return m, nil
+			}
+		case "u":
+			if m.current == listView {
+				if item, ok := m.list.SelectedItem().(Extension); ok {
+					m.list.NewStatusMessage("Updating " + item.Name + "…")
+					return m, updateExtension(item)
+				}
+			}
+		case "U":
+			if m.current == listView {
+				m.list.NewStatusMessage("Updating all extensions…")
+				return m, updateAllExtensions()
+			}
+		case "x":
+			if m.current == listView {
+				if item, ok := m.list.SelectedItem().(Extension); ok {
+					m.confirmRemove = true
+					m.list.NewStatusMessage("Remove " + item.Name + "? Press x/y to confirm, any other key to cancel.")
+				}
 				return m, nil
 			}
 		}
@@ -128,6 +177,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetContent(m.readme)
 		m.ready = true
 		return m, nil
+
+	case updateMsg:
+		if msg.err != nil {
+			m.list.NewStatusMessage("✗ Update failed: " + msg.err.Error())
+		} else {
+			m.list.NewStatusMessage("✓ Updated " + msg.ext.Name)
+		}
+		return m, nil
+
+	case removeMsg:
+		if msg.err != nil {
+			m.list.NewStatusMessage("✗ Remove failed: " + msg.err.Error())
+		} else {
+			m.list.NewStatusMessage("✓ Removed " + msg.ext.Name)
+			// Rebuild list without the removed extension.
+			var items []list.Item
+			for _, item := range m.list.Items() {
+				if ext, ok := item.(Extension); ok && ext.Name != msg.ext.Name {
+					items = append(items, item)
+				}
+			}
+			m.list.SetItems(items)
+			m.list.Title = fmt.Sprintf("gh exts — %d extension(s)", len(items))
+		}
+		return m, nil
+
+	case updateAllMsg:
+		if msg.err != nil {
+			m.list.NewStatusMessage("✗ Update all failed: " + msg.err.Error())
+		} else {
+			m.list.NewStatusMessage("✓ All extensions updated")
+		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -152,6 +234,51 @@ func (m model) View() string {
 }
 
 // --- commands ---
+
+// extShortName extracts the short name for gh extension commands.
+// e.g. "gh contrib" -> "contrib"
+func extShortName(ext Extension) string {
+	name := ext.Name
+	if strings.HasPrefix(name, "gh ") {
+		name = strings.TrimPrefix(name, "gh ")
+	}
+	return name
+}
+
+func updateExtension(ext Extension) tea.Cmd {
+	return func() tea.Msg {
+		name := extShortName(ext)
+		cmd := exec.Command("gh", "extension", "upgrade", name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return updateMsg{ext: ext, err: fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return updateMsg{ext: ext}
+	}
+}
+
+func updateAllExtensions() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command("gh", "extension", "upgrade", "--all")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return updateAllMsg{err: fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return updateAllMsg{}
+	}
+}
+
+func removeExtension(ext Extension) tea.Cmd {
+	return func() tea.Msg {
+		name := extShortName(ext)
+		cmd := exec.Command("gh", "extension", "remove", name)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return removeMsg{ext: ext, err: fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return removeMsg{ext: ext}
+	}
+}
 
 func fetchReadme(ext Extension) tea.Cmd {
 	return func() tea.Msg {
@@ -307,6 +434,14 @@ func main() {
 	l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(exts))
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
+	l.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{
+			key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "update")),
+			key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "update all")),
+			key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+			key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "view readme")),
+		}
+	}
 
 	m := model{list: l}
 
