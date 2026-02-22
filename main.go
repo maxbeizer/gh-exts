@@ -4,15 +4,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -170,122 +167,82 @@ const (
 	changelogView
 )
 
-// ghDelegate renders list items in a minimal gh-CLI style.
-type ghDelegate struct {
-	extensions []Extension // for health/version enrichment on installed items
+// listItem is a union type for items displayed in the picker.
+type listItem struct {
+	ext    *Extension
+	browse *BrowseExtension
 }
 
-func (d ghDelegate) Height() int                               { return 2 }
-func (d ghDelegate) Spacing() int                              { return 0 }
-func (d ghDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd   { return nil }
-
-func (d ghDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	selected := index == m.Index()
-	cursor := "  "
-	if selected {
-		cursor = greenStyle.Render("▸ ")
+func (li listItem) name() string {
+	if li.ext != nil {
+		return li.ext.Name
 	}
-
-	switch it := item.(type) {
-	case Extension:
-		// Enrich with health/version data from model's extensions slice
-		for _, ext := range d.extensions {
-			if ext.Name == it.Name {
-				it = ext
-				break
-			}
-		}
-
-		name := it.Name
-		if selected {
-			name = boldStyle.Render(name)
-		}
-
-		// Build metadata parts
-		var meta []string
-		if it.Repo != "" {
-			meta = append(meta, it.Repo)
-		} else {
-			meta = append(meta, "local")
-		}
-		if it.Version != "" {
-			meta = append(meta, it.Version)
-		}
-		if it.Health != nil {
-			if it.Health.Stars > 0 {
-				meta = append(meta, fmt.Sprintf("★%d", it.Health.Stars))
-			}
-			if it.Health.Archived {
-				meta = append(meta, redStyle.Render("archived"))
-			} else if !it.Health.PushedAt.IsZero() && it.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
-				meta = append(meta, yellowStyle.Render("stale"))
-			}
-		}
-		if it.HasUpdate() {
-			meta = append(meta, yellowStyle.Render("↑ "+it.LatestVersion))
-		}
-
-		metaStr := dimStyle.Render(strings.Join(meta, " · "))
-		fmt.Fprintf(w, "%s%s\n  %s\n", cursor, name, metaStr)
-
-	case BrowseExtension:
-		name := it.FullName
-		if selected {
-			name = boldStyle.Render(name)
-		}
-		var meta []string
-		meta = append(meta, fmt.Sprintf("★%d", it.Stars))
-		if it.Installed {
-			meta = append(meta, greenStyle.Render("installed"))
-		}
-		if it.Desc != "" {
-			// Truncate description to fit
-			desc := it.Desc
-			if len(desc) > 60 {
-				desc = desc[:57] + "…"
-			}
-			meta = append(meta, desc)
-		}
-		metaStr := dimStyle.Render(strings.Join(meta, " · "))
-		fmt.Fprintf(w, "%s%s\n  %s\n", cursor, name, metaStr)
-	}
+	return li.browse.FullName
 }
 
-// newStyledList creates a list with gh-native styling.
-func newStyledList(items []list.Item, title string, exts []Extension) list.Model {
-	d := ghDelegate{extensions: exts}
-	l := list.New(items, d, 80, 24)
-	l.Title = title
-	l.SetShowStatusBar(true)
-	l.SetFilteringEnabled(true)
-	l.SetShowHelp(true)
-
-	// gh-native title style: plain bold, no background
-	l.Styles.Title = boldStyle
-	l.Styles.TitleBar = lipgloss.NewStyle().Padding(0, 0, 1, 0)
-
-	// Minimal filter styling
-	l.Styles.FilterPrompt = cyanStyle
-	l.Styles.FilterCursor = cyanStyle
-
-	return l
+func (li listItem) matchText() string {
+	if li.ext != nil {
+		return li.ext.Name + " " + li.ext.Repo
+	}
+	return li.browse.FullName + " " + li.browse.Desc
 }
 
 type model struct {
-	list          list.Model
-	viewport      viewport.Model
-	current       viewState
-	readme        string
-	extName       string
-	currentExt    Extension
-	width         int
-	height        int
-	ready         bool
+	// List state
+	items      []listItem
+	filtered   []int // indices into items that match filter
+	cursor     int
+	filter     string
+	filtering  bool
+	scrollOff  int // first visible item index in filtered list
+
+	// Detail state
+	viewport   viewport.Model
+	current    viewState
+	readme     string
+	extName    string
+	currentExt Extension
+
+	// App state
 	extensions    []Extension
 	outdatedOnly  bool
 	browseMode    bool
 	statusMsg     string
 	confirmRemove bool
+	width         int
+	height        int
+	ready         bool
+}
+
+func (m *model) applyFilter() {
+	m.filtered = m.filtered[:0]
+	q := strings.ToLower(m.filter)
+	for i, it := range m.items {
+		if q == "" || strings.Contains(strings.ToLower(it.matchText()), q) {
+			m.filtered = append(m.filtered, i)
+		}
+	}
+	if m.cursor >= len(m.filtered) {
+		m.cursor = max(0, len(m.filtered)-1)
+	}
+	m.scrollOff = 0
+}
+
+func (m model) selectedItem() *listItem {
+	if m.cursor >= 0 && m.cursor < len(m.filtered) {
+		return &m.items[m.filtered[m.cursor]]
+	}
+	return nil
+}
+
+// visibleLines returns how many list items fit on screen.
+func (m model) visibleLines() int {
+	// Reserve lines: 1 filter/status bar at top, 1 hints at bottom
+	v := m.height - 2
+	if v < 1 {
+		v = 1
+	}
+	return v
 }
 
 func (m model) Init() tea.Cmd {
@@ -298,88 +255,139 @@ func (m model) Init() tea.Cmd {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		// Don't intercept keys when the list is filtering.
-		if m.current == listView && m.list.FilterState() == list.Filtering {
-			var cmd tea.Cmd
-			m.list, cmd = m.list.Update(msg)
-			return m, cmd
+		// Filtering mode — capture typing
+		if m.filtering && m.current == listView {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.filtering = false
+				m.filter = ""
+				m.applyFilter()
+				return m, nil
+			case tea.KeyEnter:
+				m.filtering = false
+				return m, nil
+			case tea.KeyBackspace:
+				if len(m.filter) > 0 {
+					m.filter = m.filter[:len(m.filter)-1]
+					m.applyFilter()
+				}
+				return m, nil
+			default:
+				if msg.Type == tea.KeyRunes {
+					m.filter += string(msg.Runes)
+					m.applyFilter()
+					return m, nil
+				}
+			}
 		}
 
-		// Handle confirm-remove state (#6).
+		// Confirm-remove state
 		if m.confirmRemove {
 			m.confirmRemove = false
 			if msg.String() == "x" || msg.String() == "y" {
-				if item, ok := m.list.SelectedItem().(Extension); ok {
-					m.list.NewStatusMessage("Removing " + item.Name + "…")
-					return m, removeExtension(item)
+				if it := m.selectedItem(); it != nil && it.ext != nil {
+					m.statusMsg = "Removing " + it.ext.Name + "…"
+					return m, removeExtension(*it.ext)
 				}
 			}
-			m.list.NewStatusMessage("Remove cancelled.")
+			m.statusMsg = ""
 			return m, nil
 		}
 
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+
+		// Navigation
+		case "up", "k":
+			if m.current == listView {
+				if m.cursor > 0 {
+					m.cursor--
+				}
+				if m.cursor < m.scrollOff {
+					m.scrollOff = m.cursor
+				}
+			}
+		case "down", "j":
+			if m.current == listView {
+				if m.cursor < len(m.filtered)-1 {
+					m.cursor++
+				}
+				vis := m.visibleLines()
+				if m.cursor >= m.scrollOff+vis {
+					m.scrollOff = m.cursor - vis + 1
+				}
+			}
+
+		case "/":
+			if m.current == listView {
+				m.filtering = true
+				m.filter = ""
+				m.applyFilter()
+			}
+
 		case "enter":
 			if m.current == listView {
-				if m.browseMode {
-					if item, ok := m.list.SelectedItem().(BrowseExtension); ok {
-						return m, fetchBrowseReadme(item)
-					}
-				} else {
-					if item, ok := m.list.SelectedItem().(Extension); ok {
-						return m, fetchReadme(item)
-					}
+				it := m.selectedItem()
+				if it == nil {
+					return m, nil
+				}
+				if it.browse != nil {
+					return m, fetchBrowseReadme(*it.browse)
+				}
+				if it.ext != nil {
+					return m, fetchReadme(*it.ext)
 				}
 			}
+
 		case "c":
-			if m.current == detailView && !m.browseMode {
-				if m.currentExt.Repo != "" {
-					return m, fetchChangelog(m.currentExt)
-				}
+			if m.current == detailView && !m.browseMode && m.currentExt.Repo != "" {
+				return m, fetchChangelog(m.currentExt)
 			}
+
 		case "i":
 			if m.current == listView && m.browseMode {
-				if item, ok := m.list.SelectedItem().(BrowseExtension); ok {
-					if item.Installed {
-						m.list.NewStatusMessage(item.FullName + " is already installed")
+				if it := m.selectedItem(); it != nil && it.browse != nil {
+					if it.browse.Installed {
+						m.statusMsg = it.browse.FullName + " is already installed"
 						return m, nil
 					}
-					m.list.NewStatusMessage("Installing " + item.FullName + "...")
-					return m, installExtension(item)
+					m.statusMsg = "Installing " + it.browse.FullName + "…"
+					return m, installExtension(*it.browse)
 				}
 			}
+
 		case "u":
 			if m.current == listView && !m.browseMode {
-				if item, ok := m.list.SelectedItem().(Extension); ok {
-					m.list.NewStatusMessage("Updating " + item.Name + "…")
-					return m, updateExtension(item)
+				if it := m.selectedItem(); it != nil && it.ext != nil {
+					m.statusMsg = "Updating " + it.ext.Name + "…"
+					return m, updateExtension(*it.ext)
 				}
 			}
 		case "U":
 			if m.current == listView && !m.browseMode {
-				m.list.NewStatusMessage("Updating all extensions…")
+				m.statusMsg = "Updating all extensions…"
 				return m, updateAllExtensions()
 			}
 		case "x":
 			if m.current == listView && !m.browseMode {
-				if item, ok := m.list.SelectedItem().(Extension); ok {
+				if it := m.selectedItem(); it != nil && it.ext != nil {
 					m.confirmRemove = true
-					m.list.NewStatusMessage("Remove " + item.Name + "? Press x/y to confirm, any other key to cancel.")
+					m.statusMsg = "Remove " + it.ext.Name + "? (x/y to confirm)"
 				}
 				return m, nil
 			}
+
 		case "esc", "backspace":
 			if m.current == changelogView {
 				m.current = detailView
-				h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-				m.viewport = viewport.New(m.width-h, m.height-v)
+				m.viewport = viewport.New(m.width, m.height-1)
 				m.viewport.SetContent(m.readme)
 				return m, nil
 			}
 			if m.current == detailView {
 				m.current = listView
+				m.statusMsg = ""
 				return m, nil
 			}
 		}
@@ -387,29 +395,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-		m.list.SetSize(msg.Width-h, msg.Height-v)
 		if m.ready {
-			m.viewport.Width = msg.Width - h
-			m.viewport.Height = msg.Height - v
+			m.viewport.Width = msg.Width
+			m.viewport.Height = msg.Height - 1
 		}
 
 	case readmeMsg:
 		header := formatRepoHeader(msg.ext, msg.repoInfo)
-		m.readme = header + "\n\n" + msg.content
+		m.readme = header + "\n" + msg.content
 		m.extName = msg.ext.Name
 		m.currentExt = msg.ext
 		m.current = detailView
-		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(m.readme)
 		m.ready = true
 		return m, nil
 
 	case changelogMsg:
 		m.current = changelogView
-		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(msg.content)
 		m.ready = true
 		return m, nil
@@ -418,27 +422,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.readme = msg.content
 		m.extName = msg.ext.FullName
 		m.current = detailView
-		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(m.readme)
 		m.ready = true
 		return m, nil
 
 	case installMsg:
 		if msg.err != nil {
-			m.statusMsg = "Install failed: " + msg.err.Error()
+			m.statusMsg = redStyle.Render("✗") + " Install failed: " + msg.err.Error()
 		} else {
-			m.statusMsg = "Installed " + msg.ext.FullName + " ✓"
-			items := m.list.Items()
-			for i, it := range items {
-				if b, ok := it.(BrowseExtension); ok && b.FullName == msg.ext.FullName {
-					b.Installed = true
-					items[i] = b
+			m.statusMsg = greenStyle.Render("✓") + " Installed " + msg.ext.FullName
+			for i := range m.items {
+				if m.items[i].browse != nil && m.items[i].browse.FullName == msg.ext.FullName {
+					m.items[i].browse.Installed = true
 				}
 			}
-			m.list.SetItems(items)
 		}
-		m.list.NewStatusMessage(m.statusMsg)
 		return m, nil
 
 	case versionsMsg:
@@ -447,7 +446,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.extensions[i].LatestVersion = v
 			}
 		}
-		return m, m.rebuildList()
+		m.rebuildItems()
+		return m, nil
 
 	case healthMsg:
 		for i, ext := range m.extensions {
@@ -455,22 +455,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.extensions[i].Health = &h
 			}
 		}
-		return m, m.rebuildList()
+		m.rebuildItems()
+		return m, nil
 
 	case updateMsg:
 		if msg.err != nil {
-			m.list.NewStatusMessage("✗ Update failed: " + msg.err.Error())
+			m.statusMsg = redStyle.Render("✗") + " Update failed: " + msg.err.Error()
 		} else {
-			m.list.NewStatusMessage("✓ Updated " + msg.ext.Name)
+			m.statusMsg = greenStyle.Render("✓") + " Updated " + msg.ext.Name
 		}
 		return m, nil
 
 	case removeMsg:
 		if msg.err != nil {
-			m.list.NewStatusMessage("✗ Remove failed: " + msg.err.Error())
+			m.statusMsg = redStyle.Render("✗") + " Remove failed: " + msg.err.Error()
 		} else {
-			m.list.NewStatusMessage("✓ Removed " + msg.ext.Name)
-			// Rebuild list without the removed extension.
+			m.statusMsg = greenStyle.Render("✓") + " Removed " + msg.ext.Name
 			var newExts []Extension
 			for _, ext := range m.extensions {
 				if ext.Name != msg.ext.Name {
@@ -478,71 +478,182 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.extensions = newExts
-			return m, m.rebuildList()
+			m.rebuildItems()
 		}
 		return m, nil
 
 	case updateAllMsg:
 		if msg.err != nil {
-			m.list.NewStatusMessage("✗ Update all failed: " + msg.err.Error())
+			m.statusMsg = redStyle.Render("✗") + " Update all failed: " + msg.err.Error()
 		} else {
-			m.list.NewStatusMessage("✓ All extensions updated")
+			m.statusMsg = greenStyle.Render("✓") + " All extensions updated"
 		}
 		return m, nil
 
 	case errMsg:
 		m.readme = fmt.Sprintf("Error: %v", msg.err)
 		m.current = detailView
-		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
-		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(m.readme)
 		m.ready = true
 		return m, nil
 	}
 
-	var cmd tea.Cmd
-	if m.current == listView {
-		m.list, cmd = m.list.Update(msg)
-	} else {
-		// detailView and changelogView both use the viewport
+	// Pass through to viewport in detail/changelog views
+	if m.current != listView {
+		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
 	}
-	return m, cmd
+	return m, nil
 }
 
-// rebuildList refreshes the list items from m.extensions, applying outdated filter.
-func (m *model) rebuildList() tea.Cmd {
-	var items []list.Item
-	for _, ext := range m.extensions {
-		if m.outdatedOnly && !ext.HasUpdate() {
+func (m *model) rebuildItems() {
+	m.items = m.items[:0]
+	for i := range m.extensions {
+		if m.outdatedOnly && !m.extensions[i].HasUpdate() {
 			continue
 		}
-		items = append(items, ext)
+		m.items = append(m.items, listItem{ext: &m.extensions[i]})
 	}
-	title := fmt.Sprintf("Showing %d extension(s)", len(items))
-	if m.outdatedOnly {
-		title = fmt.Sprintf("Showing %d extension(s) with updates", len(items))
-	}
-	m.list.Title = title
-	m.list.SetDelegate(ghDelegate{extensions: m.extensions})
-	return m.list.SetItems(items)
+	m.applyFilter()
 }
 
 func (m model) View() string {
 	if m.current == changelogView {
-		header := boldStyle.Render(m.extName+" — Changelog") +
-			dimStyle.Render("  esc to go back")
-		return lipgloss.NewStyle().Margin(1, 2).Render(header + "\n\n" + m.viewport.View())
+		hint := dimStyle.Render("esc to go back")
+		return hint + "\n" + m.viewport.View()
 	}
 	if m.current == detailView {
 		hints := "esc to go back"
 		if !m.browseMode {
 			hints += " · c changelog"
 		}
-		hint := dimStyle.Render(hints)
-		return lipgloss.NewStyle().Margin(1, 2).Render(hint + "\n" + m.viewport.View())
+		return dimStyle.Render(hints) + "\n" + m.viewport.View()
 	}
-	return lipgloss.NewStyle().Margin(0, 2).Render(m.list.View())
+	return m.renderList()
+}
+
+func (m model) renderList() string {
+	var b strings.Builder
+	vis := m.visibleLines()
+
+	// Top bar: filter or status
+	if m.filtering {
+		b.WriteString(cyanStyle.Render("/") + m.filter + cyanStyle.Render("▌") + "\n")
+	} else if m.statusMsg != "" {
+		b.WriteString(m.statusMsg + "\n")
+	} else if m.confirmRemove {
+		b.WriteString(yellowStyle.Render(m.statusMsg) + "\n")
+	} else {
+		count := len(m.filtered)
+		label := fmt.Sprintf("Showing %d extension(s)", count)
+		if m.outdatedOnly {
+			label = fmt.Sprintf("Showing %d with updates", count)
+		}
+		if m.browseMode {
+			label = fmt.Sprintf("Showing %d extension(s)", count)
+		}
+		b.WriteString(dimStyle.Render(label) + "\n")
+	}
+
+	// Items
+	end := m.scrollOff + vis
+	if end > len(m.filtered) {
+		end = len(m.filtered)
+	}
+	for vi := m.scrollOff; vi < end; vi++ {
+		it := m.items[m.filtered[vi]]
+		selected := vi == m.cursor
+
+		cursor := "  "
+		if selected {
+			cursor = greenStyle.Render("> ")
+		}
+
+		b.WriteString(cursor)
+		b.WriteString(m.renderItem(it, selected))
+		b.WriteString("\n")
+	}
+
+	// Pad remaining lines
+	rendered := end - m.scrollOff
+	for i := rendered; i < vis; i++ {
+		b.WriteString("\n")
+	}
+
+	// Bottom hints
+	if m.browseMode {
+		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · i install · / filter · q quit"))
+	} else {
+		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · u update · x remove · / filter · q quit"))
+	}
+
+	return b.String()
+}
+
+func (m model) renderItem(it listItem, selected bool) string {
+	if it.ext != nil {
+		return m.renderExtItem(*it.ext, selected)
+	}
+	return m.renderBrowseItem(*it.browse, selected)
+}
+
+func (m model) renderExtItem(ext Extension, selected bool) string {
+	name := ext.Name
+	if selected {
+		name = boldStyle.Render(name)
+	}
+
+	var meta []string
+	if ext.Repo != "" {
+		meta = append(meta, ext.Repo)
+	} else {
+		meta = append(meta, "local")
+	}
+	if ext.Version != "" {
+		meta = append(meta, ext.Version)
+	}
+	if ext.Health != nil && ext.Health.Stars > 0 {
+		meta = append(meta, fmt.Sprintf("★%d", ext.Health.Stars))
+	}
+	if ext.Health != nil && ext.Health.Archived {
+		meta = append(meta, redStyle.Render("archived"))
+	} else if ext.Health != nil && !ext.Health.PushedAt.IsZero() &&
+		ext.Health.PushedAt.Before(time.Now().AddDate(0, -6, 0)) {
+		meta = append(meta, yellowStyle.Render("stale"))
+	}
+	if ext.HasUpdate() {
+		meta = append(meta, yellowStyle.Render("↑"+ext.LatestVersion))
+	}
+
+	return name + "  " + dimStyle.Render(strings.Join(meta, " · "))
+}
+
+func (m model) renderBrowseItem(ext BrowseExtension, selected bool) string {
+	name := ext.FullName
+	if selected {
+		name = boldStyle.Render(name)
+	}
+
+	var meta []string
+	meta = append(meta, fmt.Sprintf("★%d", ext.Stars))
+	if ext.Installed {
+		meta = append(meta, greenStyle.Render("installed"))
+	}
+	if ext.Desc != "" {
+		desc := ext.Desc
+		maxLen := m.width - len(name) - 30
+		if maxLen < 20 {
+			maxLen = 20
+		}
+		if len(desc) > maxLen {
+			desc = desc[:maxLen-1] + "…"
+		}
+		meta = append(meta, desc)
+	}
+
+	return name + "  " + dimStyle.Render(strings.Join(meta, " · "))
 }
 
 // --- commands ---
@@ -1060,12 +1171,23 @@ Keys (browse mode):
 `, version)
 }
 
-func extHelpKeys() []key.Binding {
-	return []key.Binding{
-		key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "update")),
-		key.NewBinding(key.WithKeys("U"), key.WithHelp("U", "update all")),
-		key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "remove")),
+func newModel(exts []Extension, outdated, browse bool) model {
+	m := model{
+		extensions:   exts,
+		outdatedOnly: outdated,
+		browseMode:   browse,
 	}
+	m.rebuildItems()
+	return m
+}
+
+func newBrowseModel(browse []BrowseExtension) model {
+	m := model{browseMode: true}
+	for i := range browse {
+		m.items = append(m.items, listItem{browse: &browse[i]})
+	}
+	m.applyFilter()
+	return m
 }
 
 func main() {
@@ -1100,22 +1222,13 @@ func main() {
 
 	installed := getExtensions()
 
-	// Browse mode (#5)
 	if browseMode {
 		browse := getBrowseExtensions(installed)
 		if len(browse) == 0 {
 			fmt.Println("No extensions found.")
 			return
 		}
-		items := make([]list.Item, len(browse))
-		for i, b := range browse {
-			items[i] = b
-		}
-
-		l := newStyledList(items, fmt.Sprintf("Browse extensions · %d found · i install · enter readme", len(browse)), nil)
-
-		m := model{list: l, browseMode: true}
-
+		m := newBrowseModel(browse)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -1129,7 +1242,6 @@ func main() {
 		return
 	}
 
-	// Direct argument jump (#1)
 	displayExts := installed
 	if query != "" {
 		matches := fuzzyMatch(installed, query)
@@ -1139,14 +1251,7 @@ func main() {
 			os.Exit(1)
 		case 1:
 			// Exactly one match — jump straight to detail view.
-			items := make([]list.Item, len(installed))
-			for i, e := range installed {
-				items[i] = e
-			}
-			l := newStyledList(items, fmt.Sprintf("Showing %d extension(s)", len(installed)), installed)
-			l.AdditionalShortHelpKeys = extHelpKeys
-
-			m := model{list: l, extensions: installed, outdatedOnly: outdated}
+			m := newModel(installed, outdated, false)
 			p := tea.NewProgram(m, tea.WithAltScreen())
 			go func() {
 				p.Send(fetchReadme(matches[0])())
@@ -1161,20 +1266,9 @@ func main() {
 		}
 	}
 
-	items := make([]list.Item, len(displayExts))
-	for i, e := range displayExts {
-		items[i] = e
-	}
-
-	title := fmt.Sprintf("Showing %d extension(s)", len(displayExts))
-	if outdated {
-		title = "Checking for updates…"
-	}
-	l := newStyledList(items, title, installed)
-	l.AdditionalShortHelpKeys = extHelpKeys
-
-	m := model{list: l, extensions: installed, outdatedOnly: outdated}
-
+	m := newModel(displayExts, outdated, false)
+	// Keep full list for health/version updates
+	m.extensions = installed
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -1183,6 +1277,5 @@ func main() {
 }
 
 func init() {
-	// Ensure JSON output isn't broken by pagers.
 	os.Setenv("GH_PAGER", "")
 }
