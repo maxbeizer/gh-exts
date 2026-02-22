@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,11 +40,47 @@ func (e Extension) FilterValue() string {
 	return e.Name + " " + e.Repo
 }
 
+// BrowseExtension represents a gh extension from the GitHub search API.
+type BrowseExtension struct {
+	FullName string
+	Desc     string
+	Stars    int
+	Installed bool
+}
+
+func (b BrowseExtension) Title() string {
+	title := b.FullName
+	if b.Installed {
+		title += "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("[installed]")
+	}
+	return title
+}
+func (b BrowseExtension) Description() string {
+	star := fmt.Sprintf("★ %d", b.Stars)
+	if b.Desc != "" {
+		return b.Desc + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(star)
+	}
+	return star
+}
+func (b BrowseExtension) FilterValue() string {
+	return b.FullName + " " + b.Desc
+}
+
 // --- messages ---
 
 type readmeMsg struct {
 	content string
 	ext     Extension
+}
+
+type browseReadmeMsg struct {
+	content string
+	ext     BrowseExtension
+}
+
+type installMsg struct {
+	ext BrowseExtension
+	err error
 }
 
 type errMsg struct{ err error }
@@ -58,14 +95,16 @@ const (
 )
 
 type model struct {
-	list     list.Model
-	viewport viewport.Model
-	current  view
-	readme   string
-	extName  string
-	width    int
-	height   int
-	ready    bool
+	list       list.Model
+	viewport   viewport.Model
+	current    view
+	readme     string
+	extName    string
+	width      int
+	height     int
+	ready      bool
+	browseMode bool
+	statusMsg  string
 }
 
 func (m model) Init() tea.Cmd {
@@ -87,8 +126,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "enter":
 			if m.current == listView {
-				if item, ok := m.list.SelectedItem().(Extension); ok {
-					return m, fetchReadme(item)
+				if m.browseMode {
+					if item, ok := m.list.SelectedItem().(BrowseExtension); ok {
+						return m, fetchBrowseReadme(item)
+					}
+				} else {
+					if item, ok := m.list.SelectedItem().(Extension); ok {
+						return m, fetchReadme(item)
+					}
+				}
+			}
+		case "i":
+			if m.current == listView && m.browseMode {
+				if item, ok := m.list.SelectedItem().(BrowseExtension); ok {
+					if item.Installed {
+						m.statusMsg = item.FullName + " is already installed"
+						m.list.NewStatusMessage(m.statusMsg)
+						return m, nil
+					}
+					m.statusMsg = "Installing " + item.FullName + "..."
+					m.list.NewStatusMessage(m.statusMsg)
+					return m, installExtension(item)
 				}
 			}
 		case "esc", "backspace":
@@ -116,6 +174,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport = viewport.New(m.width-h, m.height-v)
 		m.viewport.SetContent(m.readme)
 		m.ready = true
+		return m, nil
+
+	case browseReadmeMsg:
+		m.readme = msg.content
+		m.extName = msg.ext.FullName
+		m.current = detailView
+		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
+		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport.SetContent(m.readme)
+		m.ready = true
+		return m, nil
+
+	case installMsg:
+		if msg.err != nil {
+			m.statusMsg = "Install failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = "Installed " + msg.ext.FullName + " ✓"
+			// Mark as installed in the list.
+			items := m.list.Items()
+			for i, it := range items {
+				if b, ok := it.(BrowseExtension); ok && b.FullName == msg.ext.FullName {
+					b.Installed = true
+					items[i] = b
+				}
+			}
+			m.list.SetItems(items)
+		}
+		m.list.NewStatusMessage(m.statusMsg)
 		return m, nil
 
 	case errMsg:
@@ -185,6 +271,38 @@ func fetchReadme(ext Extension) tea.Cmd {
 	}
 }
 
+func fetchBrowseReadme(ext BrowseExtension) tea.Cmd {
+	return func() tea.Msg {
+		out, err := exec.Command("gh", "api", "repos/"+ext.FullName+"/readme",
+			"--jq", ".content").Output()
+		if err != nil {
+			return browseReadmeMsg{
+				content: "No README found for " + ext.FullName,
+				ext:     ext,
+			}
+		}
+
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(out)))
+		if err != nil {
+			return errMsg{err}
+		}
+
+		rendered, err := glamour.Render(string(decoded), "dark")
+		if err != nil {
+			return browseReadmeMsg{content: string(decoded), ext: ext}
+		}
+
+		return browseReadmeMsg{content: rendered, ext: ext}
+	}
+}
+
+func installExtension(ext BrowseExtension) tea.Cmd {
+	return func() tea.Msg {
+		err := exec.Command("gh", "extension", "install", ext.FullName).Run()
+		return installMsg{ext: ext, err: err}
+	}
+}
+
 // --- helpers ---
 
 func getExtensions() []Extension {
@@ -217,17 +335,67 @@ func getExtensions() []Extension {
 	return exts
 }
 
+type searchResult struct {
+	Items []struct {
+		FullName    string `json:"full_name"`
+		Description string `json:"description"`
+		Stars       int    `json:"stargazers_count"`
+	} `json:"items"`
+}
+
+func getBrowseExtensions(installed []Extension) []BrowseExtension {
+	out, err := exec.Command("gh", "api",
+		"search/repositories?q=topic:gh-extension&sort=stars&order=desc&per_page=50").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error searching extensions:", err)
+		os.Exit(1)
+	}
+
+	var result searchResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		fmt.Fprintln(os.Stderr, "Error parsing search results:", err)
+		os.Exit(1)
+	}
+
+	installedSet := make(map[string]bool)
+	for _, ext := range installed {
+		if ext.Repo != "" {
+			installedSet[strings.ToLower(ext.Repo)] = true
+		}
+	}
+
+	var exts []BrowseExtension
+	for _, item := range result.Items {
+		exts = append(exts, BrowseExtension{
+			FullName:  item.FullName,
+			Desc:      item.Description,
+			Stars:     item.Stars,
+			Installed: installedSet[strings.ToLower(item.FullName)],
+		})
+	}
+	return exts
+}
+
 func usage() {
 	fmt.Printf(`gh-exts v%s — Your extensions, in depth
 
 Usage:
   gh exts              Interactive extension browser
+  gh exts --browse     Browse and install new extensions from GitHub
   gh exts -h           Show help
   gh exts -v           Show version
+
+Keys (browse mode):
+  Enter    View README
+  i        Install selected extension
+  /        Filter
+  Esc      Go back
+  q        Quit
 `, version)
 }
 
 func main() {
+	browseMode := false
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "-h", "--help", "help":
@@ -236,27 +404,46 @@ func main() {
 		case "-v", "--version", "version":
 			fmt.Printf("gh-exts v%s\n", version)
 			return
+		case "--browse":
+			browseMode = true
 		}
 	}
 
-	exts := getExtensions()
-	if len(exts) == 0 {
-		fmt.Println("No extensions installed.")
-		return
-	}
+	installed := getExtensions()
 
-	items := make([]list.Item, len(exts))
-	for i, e := range exts {
-		items[i] = e
+	var items []list.Item
+	var title string
+
+	if browseMode {
+		browse := getBrowseExtensions(installed)
+		if len(browse) == 0 {
+			fmt.Println("No extensions found.")
+			return
+		}
+		items = make([]list.Item, len(browse))
+		for i, b := range browse {
+			items[i] = b
+		}
+		title = fmt.Sprintf("gh exts --browse — %d extension(s)  (i=install, enter=readme)", len(browse))
+	} else {
+		if len(installed) == 0 {
+			fmt.Println("No extensions installed.")
+			return
+		}
+		items = make([]list.Item, len(installed))
+		for i, e := range installed {
+			items[i] = e
+		}
+		title = fmt.Sprintf("gh exts — %d extension(s)", len(installed))
 	}
 
 	delegate := list.NewDefaultDelegate()
 	l := list.New(items, delegate, 80, 24)
-	l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(exts))
+	l.Title = title
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 
-	m := model{list: l}
+	m := model{list: l, browseMode: browseMode}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
