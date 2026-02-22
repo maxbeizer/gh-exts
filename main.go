@@ -41,9 +41,22 @@ func (e Extension) FilterValue() string {
 	return e.Name + " " + e.Repo
 }
 
+// Release represents a GitHub release.
+type Release struct {
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	Body        string `json:"body"`
+	PublishedAt string `json:"published_at"`
+}
+
 // --- messages ---
 
 type readmeMsg struct {
+	content string
+	ext     Extension
+}
+
+type changelogMsg struct {
 	content string
 	ext     Extension
 }
@@ -57,17 +70,19 @@ type view int
 const (
 	listView view = iota
 	detailView
+	changelogView
 )
 
 type model struct {
-	list     list.Model
-	viewport viewport.Model
-	current  view
-	readme   string
-	extName  string
-	width    int
-	height   int
-	ready    bool
+	list       list.Model
+	viewport   viewport.Model
+	current    view
+	readme     string
+	extName    string
+	currentExt Extension
+	width      int
+	height     int
+	ready      bool
 }
 
 func (m model) Init() tea.Cmd {
@@ -93,7 +108,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, fetchReadme(item)
 				}
 			}
+		case "c":
+			if m.current == detailView {
+				if m.currentExt.Repo != "" {
+					return m, fetchChangelog(m.currentExt)
+				}
+			}
 		case "esc", "backspace":
+			if m.current == changelogView {
+				m.current = detailView
+				h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
+				m.viewport = viewport.New(m.width-h, m.height-v)
+				m.viewport.SetContent(m.readme)
+				return m, nil
+			}
 			if m.current == detailView {
 				m.current = listView
 				return m, nil
@@ -113,10 +141,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case readmeMsg:
 		m.readme = msg.content
 		m.extName = msg.ext.Name
+		m.currentExt = msg.ext
 		m.current = detailView
 		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
 		m.viewport = viewport.New(m.width-h, m.height-v)
 		m.viewport.SetContent(m.readme)
+		m.ready = true
+		return m, nil
+
+	case changelogMsg:
+		m.current = changelogView
+		h, v := lipgloss.NewStyle().Margin(1, 2).GetFrameSize()
+		m.viewport = viewport.New(m.width-h, m.height-v)
+		m.viewport.SetContent(msg.content)
 		m.ready = true
 		return m, nil
 
@@ -134,18 +171,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.current == listView {
 		m.list, cmd = m.list.Update(msg)
 	} else {
+		// detailView and changelogView both use the viewport
 		m.viewport, cmd = m.viewport.Update(msg)
 	}
 	return m, cmd
 }
 
 func (m model) View() string {
+	if m.current == changelogView {
+		header := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("212")).
+			Render(m.extName+" — Changelog") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  (esc to go back)")
+		return lipgloss.NewStyle().Margin(1, 2).Render(header + "\n\n" + m.viewport.View())
+	}
 	if m.current == detailView {
 		header := lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("212")).
 			Render(m.extName) +
-			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  (esc to go back)")
+			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("  (esc to go back · c for changelog)")
 		return lipgloss.NewStyle().Margin(1, 2).Render(header+"\n\n"+m.viewport.View())
 	}
 	return lipgloss.NewStyle().Margin(1, 2).Render(m.list.View())
@@ -187,7 +233,113 @@ func fetchReadme(ext Extension) tea.Cmd {
 	}
 }
 
-// --- helpers ---
+func fetchChangelog(ext Extension) tea.Cmd {
+	return func() tea.Msg {
+		if ext.Repo == "" {
+			return changelogMsg{
+				content: "Local extension — no changelog available.",
+				ext:     ext,
+			}
+		}
+
+		out, err := exec.Command("gh", "api", "repos/"+ext.Repo+"/releases").Output()
+		if err != nil {
+			return changelogMsg{
+				content: "No releases found for " + ext.Repo + ".",
+				ext:     ext,
+			}
+		}
+
+		var releases []Release
+		if err := json.Unmarshal(out, &releases); err != nil {
+			return changelogMsg{
+				content: "Could not parse releases for " + ext.Repo + ".",
+				ext:     ext,
+			}
+		}
+
+		if len(releases) == 0 {
+			return changelogMsg{
+				content: "No releases found for " + ext.Repo + ".",
+				ext:     ext,
+			}
+		}
+
+		// Filter to releases newer than installed version
+		installedVer := normalizeVersion(ext.Version)
+		var newer []Release
+		for _, r := range releases {
+			if installedVer == "" || compareVersions(normalizeVersion(r.TagName), installedVer) > 0 {
+				newer = append(newer, r)
+			}
+		}
+
+		if len(newer) == 0 {
+			return changelogMsg{
+				content: "You're up to date! No releases newer than " + ext.Version + ".",
+				ext:     ext,
+			}
+		}
+
+		var sb strings.Builder
+		for _, r := range newer {
+			title := r.TagName
+			if r.Name != "" && r.Name != r.TagName {
+				title += " — " + r.Name
+			}
+			sb.WriteString("## " + title + "\n")
+			if r.PublishedAt != "" {
+				date := r.PublishedAt
+				if len(date) >= 10 {
+					date = date[:10]
+				}
+				sb.WriteString("*Released: " + date + "*\n\n")
+			}
+			if r.Body != "" {
+				sb.WriteString(r.Body + "\n\n")
+			} else {
+				sb.WriteString("_No release notes._\n\n")
+			}
+			sb.WriteString("---\n\n")
+		}
+
+		rendered, err := glamour.Render(sb.String(), "dark")
+		if err != nil {
+			return changelogMsg{content: sb.String(), ext: ext}
+		}
+
+		return changelogMsg{content: rendered, ext: ext}
+	}
+}
+
+// normalizeVersion strips a leading "v" prefix.
+func normalizeVersion(v string) string {
+	return strings.TrimPrefix(strings.TrimSpace(v), "v")
+}
+
+// compareVersions compares two dot-separated version strings.
+// Returns >0 if a > b, <0 if a < b, 0 if equal.
+func compareVersions(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	maxLen := len(aParts)
+	if len(bParts) > maxLen {
+		maxLen = len(bParts)
+	}
+	for i := 0; i < maxLen; i++ {
+		var ai, bi int
+		if i < len(aParts) {
+			fmt.Sscanf(aParts[i], "%d", &ai)
+		}
+		if i < len(bParts) {
+			fmt.Sscanf(bParts[i], "%d", &bi)
+		}
+		if ai != bi {
+			return ai - bi
+		}
+	}
+	return 0
+}
 
 func getExtensions() []Extension {
 	out, err := exec.Command("gh", "extension", "list").Output()
