@@ -25,7 +25,8 @@ gh exts -v           # show version
 1. Lists all your installed extensions in a filterable picker
 2. Type `/` to search/filter by name
 3. Press `Enter` to view the full README (rendered with glamour)
-4. Press `Esc` to go back, `q` to quit
+4. Press `c` in the detail view to see the changelog (releases newer than your installed version)
+5. Press `Esc` to go back, `q` to quit
 
 Basically `gh extension list` but with depth.
 
