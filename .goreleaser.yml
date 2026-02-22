@@ -14,6 +14,7 @@ builds:
 
 archives:
   - format: binary
+    name_template: "{{ .Binary }}"
 
 release:
   draft: false
