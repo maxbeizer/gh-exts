@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -18,9 +19,10 @@ const version = "0.2.0"
 
 // Extension represents a single installed gh extension.
 type Extension struct {
-	Name    string // e.g. "gh agent-viz"
-	Repo    string // e.g. "maxbeizer/gh-agent-viz" (may be empty for local)
-	Version string // e.g. "v0.4.0" (may be empty)
+	Name          string // e.g. "gh agent-viz"
+	Repo          string // e.g. "maxbeizer/gh-agent-viz" (may be empty for local)
+	Version       string // e.g. "v0.4.0" (may be empty)
+	LatestVersion string // e.g. "v0.5.0" (fetched from GitHub releases)
 }
 
 func (e Extension) Title() string {
@@ -30,10 +32,20 @@ func (e Extension) Title() string {
 	return e.Name + "  " + lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("(local)")
 }
 func (e Extension) Description() string {
-	if e.Version != "" {
+	if e.Version == "" {
+		return "local dev"
+	}
+	if e.LatestVersion == "" {
 		return e.Version
 	}
-	return "local dev"
+	if e.Version != e.LatestVersion {
+		return e.Version + " → " + e.LatestVersion + " available"
+	}
+	return e.Version + " ✓ latest"
+}
+
+func (e Extension) HasUpdate() bool {
+	return e.Version != "" && e.LatestVersion != "" && e.Version != e.LatestVersion
 }
 func (e Extension) FilterValue() string {
 	return e.Name + " " + e.Repo
@@ -44,6 +56,10 @@ func (e Extension) FilterValue() string {
 type readmeMsg struct {
 	content string
 	ext     Extension
+}
+
+type versionsMsg struct {
+	versions map[string]string // repo -> latest version
 }
 
 type errMsg struct{ err error }
@@ -58,18 +74,20 @@ const (
 )
 
 type model struct {
-	list     list.Model
-	viewport viewport.Model
-	current  view
-	readme   string
-	extName  string
-	width    int
-	height   int
-	ready    bool
+	list       list.Model
+	viewport   viewport.Model
+	current    view
+	readme     string
+	extName    string
+	width      int
+	height     int
+	ready      bool
+	extensions []Extension
+	outdated   bool
 }
 
 func (m model) Init() tea.Cmd {
-	return nil
+	return fetchVersions(m.extensions)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -125,6 +143,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport = viewport.New(m.width-h, m.height-v)
 		m.viewport.SetContent(m.readme)
 		m.ready = true
+		return m, nil
+
+	case versionsMsg:
+		for i, ext := range m.extensions {
+			if v, ok := msg.versions[ext.Repo]; ok {
+				m.extensions[i].LatestVersion = v
+			}
+		}
+		var items []list.Item
+		for _, ext := range m.extensions {
+			if m.outdated && !ext.HasUpdate() {
+				continue
+			}
+			items = append(items, ext)
+		}
+		if m.outdated && len(items) == 0 {
+			// All extensions are up to date; show a message.
+			items = nil
+		}
+		m.list.SetItems(items)
+		m.list.Title = fmt.Sprintf("gh exts — %d extension(s)", len(items))
 		return m, nil
 	}
 
@@ -185,6 +224,39 @@ func fetchReadme(ext Extension) tea.Cmd {
 	}
 }
 
+func fetchVersions(exts []Extension) tea.Cmd {
+	return func() tea.Msg {
+		versions := make(map[string]string)
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+
+		for _, ext := range exts {
+			if ext.Repo == "" || ext.Version == "" {
+				continue
+			}
+			wg.Add(1)
+			go func(repo string) {
+				defer wg.Done()
+				out, err := exec.Command("gh", "api",
+					"repos/"+repo+"/releases/latest",
+					"--jq", ".tag_name").Output()
+				if err != nil {
+					return
+				}
+				tag := strings.TrimSpace(string(out))
+				if tag != "" {
+					mu.Lock()
+					versions[repo] = tag
+					mu.Unlock()
+				}
+			}(ext.Repo)
+		}
+
+		wg.Wait()
+		return versionsMsg{versions: versions}
+	}
+}
+
 // --- helpers ---
 
 func getExtensions() []Extension {
@@ -222,20 +294,24 @@ func usage() {
 
 Usage:
   gh exts              Interactive extension browser
+  gh exts --outdated   Show only extensions with available updates
   gh exts -h           Show help
   gh exts -v           Show version
 `, version)
 }
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	outdated := false
+	for _, arg := range os.Args[1:] {
+		switch arg {
 		case "-h", "--help", "help":
 			usage()
 			return
 		case "-v", "--version", "version":
 			fmt.Printf("gh-exts v%s\n", version)
 			return
+		case "--outdated":
+			outdated = true
 		}
 	}
 
@@ -252,11 +328,15 @@ func main() {
 
 	delegate := list.NewDefaultDelegate()
 	l := list.New(items, delegate, 80, 24)
-	l.Title = fmt.Sprintf("gh exts — %d extension(s)", len(exts))
+	title := fmt.Sprintf("gh exts — %d extension(s)", len(exts))
+	if outdated {
+		title = "gh exts — checking for updates…"
+	}
+	l.Title = title
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 
-	m := model{list: l}
+	m := model{list: l, extensions: exts, outdated: outdated}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
