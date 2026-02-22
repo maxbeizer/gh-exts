@@ -155,6 +155,11 @@ type updateAllMsg struct {
 	err error
 }
 
+type pruneMsg struct {
+	removed []string
+	errors  []string
+}
+
 type errMsg struct{ err error }
 
 // --- model ---
@@ -377,6 +382,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		case "p":
+			if m.current == listView && !m.browseMode {
+				m.statusMsg = "Pruning archived extensions…"
+				return m, pruneArchived(m.extensions)
+			}
 
 		case "esc", "backspace":
 			if m.current == changelogView {
@@ -463,6 +473,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = redStyle.Render("✗") + " Update failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = greenStyle.Render("✓") + " Updated " + msg.ext.Name
+			m.extensions = getExtensions()
+			m.rebuildItems()
+			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
 		return m, nil
 
@@ -487,6 +500,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = redStyle.Render("✗") + " Update all failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = greenStyle.Render("✓") + " All extensions updated"
+			// Refresh the extension list to pick up new versions.
+			m.extensions = getExtensions()
+			m.rebuildItems()
+			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
+		}
+		return m, nil
+
+	case pruneMsg:
+		if len(msg.removed) == 0 && len(msg.errors) == 0 {
+			m.statusMsg = dimStyle.Render("No archived extensions to prune")
+		} else {
+			parts := []string{}
+			if len(msg.removed) > 0 {
+				parts = append(parts, greenStyle.Render("✓")+" Pruned "+strings.Join(msg.removed, ", "))
+			}
+			if len(msg.errors) > 0 {
+				parts = append(parts, redStyle.Render("✗")+" Failed: "+strings.Join(msg.errors, ", "))
+			}
+			m.statusMsg = strings.Join(parts, "  ")
+			m.extensions = getExtensions()
+			m.rebuildItems()
+			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
 		return m, nil
 
@@ -586,7 +621,7 @@ func (m model) renderList() string {
 	if m.browseMode {
 		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · i install · / filter · q quit"))
 	} else {
-		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · u update · x remove · / filter · q quit"))
+		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · u update · x remove · p prune · / filter · q quit"))
 	}
 
 	return b.String()
@@ -609,7 +644,7 @@ func (m model) renderExtItem(ext Extension, selected bool) string {
 	if ext.Repo != "" {
 		meta = append(meta, ext.Repo)
 	} else {
-		meta = append(meta, "local")
+		meta = append(meta, cyanStyle.Render("⚙ local"))
 	}
 	if ext.Version != "" {
 		meta = append(meta, ext.Version)
@@ -977,6 +1012,25 @@ func removeExtension(ext Extension) tea.Cmd {
 	}
 }
 
+func pruneArchived(exts []Extension) tea.Cmd {
+	return func() tea.Msg {
+		var removed, errors []string
+		for _, ext := range exts {
+			if ext.Health == nil || !ext.Health.Archived || ext.Repo == "" {
+				continue
+			}
+			name := extShortName(ext)
+			cmd := exec.Command("gh", "extension", "remove", name)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				errors = append(errors, ext.Name+": "+strings.TrimSpace(string(out)))
+			} else {
+				removed = append(removed, ext.Name)
+			}
+		}
+		return pruneMsg{removed: removed, errors: errors}
+	}
+}
+
 // --- helpers ---
 
 // normalizeVersion strips a leading "v" prefix.
@@ -1157,6 +1211,7 @@ Keys (installed list):
   u        Update selected extension
   U        Update all extensions
   x        Remove selected extension (with confirmation)
+  p        Prune archived extensions
   /        Filter
   Esc      Go back
   c        Changelog (in detail view)
