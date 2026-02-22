@@ -14,6 +14,8 @@ gh extension install maxbeizer/gh-exts
 
 ```bash
 gh exts              # launch interactive extension browser
+gh exts --export     # export install script to stdout
+gh exts --export-json # export extensions as JSON
 gh exts -h           # show help
 gh exts -v           # show version
 ```
