@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -217,11 +219,55 @@ func getExtensions() []Extension {
 	return exts
 }
 
+func exportScript(exts []Extension) {
+	fmt.Printf("#!/bin/bash\n")
+	fmt.Printf("# gh-exts export — generated %s\n", time.Now().Format("2006-01-02"))
+	fmt.Printf("# Install your gh extensions on a new machine:\n\n")
+	for _, ext := range exts {
+		if ext.Repo == "" {
+			fmt.Printf("# %s — skipped (local extension)\n", ext.Name)
+			continue
+		}
+		if ext.Version != "" {
+			fmt.Printf("# version: %s\n", ext.Version)
+		}
+		fmt.Printf("gh extension install %s\n", ext.Repo)
+	}
+}
+
+type exportEntry struct {
+	Name    string `json:"name"`
+	Repo    string `json:"repo"`
+	Version string `json:"version"`
+}
+
+func exportJSON(exts []Extension) {
+	entries := make([]exportEntry, 0, len(exts))
+	for _, ext := range exts {
+		if ext.Repo == "" {
+			continue
+		}
+		entries = append(entries, exportEntry{
+			Name:    ext.Name,
+			Repo:    ext.Repo,
+			Version: ext.Version,
+		})
+	}
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error marshalling JSON:", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(data))
+}
+
 func usage() {
 	fmt.Printf(`gh-exts v%s — Your extensions, in depth
 
 Usage:
   gh exts              Interactive extension browser
+  gh exts --export     Export install script to stdout
+  gh exts --export-json Export extensions as JSON
   gh exts -h           Show help
   gh exts -v           Show version
 `, version)
@@ -235,6 +281,12 @@ func main() {
 			return
 		case "-v", "--version", "version":
 			fmt.Printf("gh-exts v%s\n", version)
+			return
+		case "--export":
+			exportScript(getExtensions())
+			return
+		case "--export-json":
+			exportJSON(getExtensions())
 			return
 		}
 	}
