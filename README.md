@@ -1,6 +1,6 @@
 # gh-exts
 
-Your extensions, in depth. An interactive browser for your installed `gh` extensions.
+Your extensions, in depth. An interactive browser for your installed `gh` extensions — with health indicators, update checks, extension management, and discovery.
 
 ![demo](demo.gif)
 
@@ -13,22 +13,86 @@ gh extension install maxbeizer/gh-exts
 ## Usage
 
 ```bash
-gh exts              # launch interactive extension browser
-gh exts --export     # export install script to stdout
-gh exts --export-json # export extensions as JSON
-gh exts -h           # show help
-gh exts -v           # show version
+gh exts                # launch interactive extension browser
+gh exts <name>         # jump directly to the detail view for <name>
+gh exts --outdated     # show only extensions with available updates
+gh exts --browse       # browse and install new extensions from GitHub
+gh exts --export       # export install script to stdout
+gh exts --export-json  # export extensions as JSON
+gh exts -h             # show help
+gh exts -v             # show version
 ```
 
-## How It Works
+### Direct Argument
 
-1. Lists all your installed extensions in a filterable picker
-2. Type `/` to search/filter by name
-3. Press `Enter` to view the full README (rendered with glamour)
-4. Press `c` in the detail view to see the changelog (releases newer than your installed version)
-5. Press `Esc` to go back, `q` to quit
+Pass a name to fuzzy-match against installed extensions. If exactly one matches, its README opens immediately. If multiple match, the picker opens pre-filtered.
 
-Basically `gh extension list` but with depth.
+```bash
+gh exts contrib        # jumps straight to gh-contrib's README
+```
+
+### Outdated Mode
+
+Show only extensions that have newer versions available on GitHub:
+
+```bash
+gh exts --outdated
+```
+
+### Browse & Install
+
+Discover popular `gh` extensions from GitHub and install them interactively:
+
+```bash
+gh exts --browse
+```
+
+Press `i` on any extension to install it.
+
+### Export
+
+Back up your extension list for easy reinstall on another machine:
+
+```bash
+gh exts --export > install-exts.sh   # shell script
+gh exts --export-json > exts.json    # JSON manifest
+```
+
+## Keybindings
+
+### Installed Extensions List
+
+| Key     | Action                                  |
+|---------|-----------------------------------------|
+| `Enter` | View README (with repo metadata header) |
+| `c`     | View changelog (in detail view)         |
+| `u`     | Update selected extension               |
+| `U`     | Update all extensions                   |
+| `x`     | Remove selected extension (confirm)     |
+| `/`     | Search / filter by name                 |
+| `Esc`   | Go back                                 |
+| `q`     | Quit                                    |
+
+### Browse Mode
+
+| Key     | Action                     |
+|---------|----------------------------|
+| `Enter` | View README                |
+| `i`     | Install selected extension |
+| `/`     | Search / filter            |
+| `Esc`   | Go back                    |
+| `q`     | Quit                       |
+
+## Features
+
+- **Health indicators** — each extension shows ★ stars, 🗄️ archived, and ⚠️ stale warnings in the list
+- **Update checks** — shows `v1.0 → v1.1 available` or `v1.0 ✓ latest` next to each extension
+- **Repo metadata** — detail view header shows description, stars, language, license, last updated
+- **Changelog** — press `c` to see releases newer than your installed version
+- **Manage** — update (`u`), update all (`U`), or remove (`x`) extensions without leaving the TUI
+- **Browse** — discover and install popular extensions from GitHub
+- **Direct jump** — `gh exts <name>` for instant README access
+- **Export** — back up your extension list as a shell script or JSON
 
 ## Uninstall
 
