@@ -1,6 +1,6 @@
 # gh-exts
 
-Your extensions, but useful.
+Your extensions, but useful. An interactive browser for your installed `gh` extensions.
 
 ![demo](demo.gif)
 
@@ -13,19 +13,17 @@ gh extension install maxbeizer/gh-exts
 ## Usage
 
 ```bash
-gh exts              # show all installed extensions with details
-gh exts <name>       # show details for one extension
+gh exts              # launch interactive extension browser
+gh exts -h           # show help
+gh exts -v           # show version
 ```
 
-## What It Shows
+## How It Works
 
-For each installed extension:
-- **Description** from the repo
-- **Language**, **stars**, **license**
-- **Archived** status if applicable
-
-For a single extension (`gh exts <name>`):
-- All the above, plus **README excerpt** and **URL**
+1. Lists all your installed extensions in a filterable picker
+2. Type `/` to search/filter by name
+3. Press `Enter` to view the full README (rendered with glamour)
+4. Press `Esc` to go back, `q` to quit
 
 Basically `gh extension list` but actually useful.
 
