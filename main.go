@@ -66,7 +66,27 @@ func (e Extension) Description() string {
 }
 
 func (e Extension) HasUpdate() bool {
-	return e.Version != "" && e.LatestVersion != "" && e.Version != e.LatestVersion
+	if e.Version == "" || e.LatestVersion == "" || e.Version == e.LatestVersion {
+		return false
+	}
+	// Don't flag commit-hash versions as outdated vs tag versions
+	if isCommitHash(e.Version) {
+		return false
+	}
+	return true
+}
+
+// isCommitHash returns true if the version looks like a git commit hash.
+func isCommitHash(v string) bool {
+	if len(v) < 7 {
+		return false
+	}
+	for _, c := range v {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // RepoInfo holds metadata fetched from the GitHub API for the detail view header.
@@ -489,8 +509,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = redStyle.Render("✗") + " Update failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = greenStyle.Render("✓") + " Updated " + msg.ext.Name
-			m.extensions = getExtensions()
-			m.rebuildItems()
+			m.refreshExtensions()
 			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
 		return m, nil
@@ -518,8 +537,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = redStyle.Render("✗") + " Update all failed: " + msg.err.Error()
 		} else {
 			m.statusMsg = greenStyle.Render("✓") + " All extensions updated"
-			m.extensions = getExtensions()
-			m.rebuildItems()
+			m.refreshExtensions()
 			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
 		return m, nil
@@ -536,8 +554,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				parts = append(parts, redStyle.Render("✗")+" Failed: "+strings.Join(msg.errors, ", "))
 			}
 			m.statusMsg = strings.Join(parts, "  ")
-			m.extensions = getExtensions()
-			m.rebuildItems()
+			m.refreshExtensions()
 			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
 		return m, nil
@@ -569,6 +586,22 @@ func (m *model) rebuildItems() {
 		m.items = append(m.items, listItem{ext: &m.extensions[i]})
 	}
 	m.applyFilter()
+}
+
+// refreshExtensions reloads from gh extension list, preserving health/version data.
+func (m *model) refreshExtensions() {
+	old := make(map[string]Extension)
+	for _, ext := range m.extensions {
+		old[ext.Name] = ext
+	}
+	m.extensions = getExtensions()
+	for i, ext := range m.extensions {
+		if prev, ok := old[ext.Name]; ok {
+			m.extensions[i].Health = prev.Health
+			m.extensions[i].LatestVersion = prev.LatestVersion
+		}
+	}
+	m.rebuildItems()
 }
 
 func (m model) View() string {
