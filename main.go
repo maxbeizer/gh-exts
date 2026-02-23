@@ -397,8 +397,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "s":
 			if m.current == detailView && m.currentExt.Repo != "" {
-				m.statusMsg = "Running security audit…"
-				return m, runSecurityAudit(m.currentExt)
+				m.current = auditView
+				m.awaitingCopilot = true // reuse spinner for scanning phase
+				m.spinnerFrame = 0
+				m.viewport = viewport.New(m.width, m.height-1)
+				m.viewport.SetContent("")
+				m.ready = true
+				return m, tea.Batch(runSecurityAudit(m.currentExt), spinnerTick())
 			}
 
 		case "i":
@@ -674,7 +679,11 @@ func (m model) View() string {
 	if m.current == auditView {
 		hint := dimStyle.Render("esc to go back")
 		if m.awaitingCopilot {
-			spinner := yellowStyle.Render(spinnerFrames[m.spinnerFrame] + " Asking Copilot…")
+			label := "Scanning source…"
+			if m.auditContent != "" {
+				label = "Asking Copilot…"
+			}
+			spinner := yellowStyle.Render(spinnerFrames[m.spinnerFrame] + " " + label)
 			hint += "  " + spinner
 		}
 		return hint + "\n" + m.viewport.View()
