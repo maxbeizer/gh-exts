@@ -180,6 +180,11 @@ type pruneMsg struct {
 	errors  []string
 }
 
+type auditMsg struct {
+	content string
+	ext     Extension
+}
+
 type errMsg struct{ err error }
 
 // --- model ---
@@ -190,6 +195,7 @@ const (
 	listView viewState = iota
 	detailView
 	changelogView
+	auditView
 )
 
 // listItem is a union type for items displayed in the picker.
@@ -371,6 +377,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.current == detailView && !m.browseMode && m.currentExt.Repo != "" {
 				return m, fetchChangelog(m.currentExt)
 			}
+		case "s":
+			if m.current == detailView && m.currentExt.Repo != "" {
+				m.statusMsg = "Running security audit…"
+				return m, runSecurityAudit(m.currentExt)
+			}
 
 		case "i":
 			if m.current == listView && m.browseMode {
@@ -424,7 +435,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "esc", "backspace":
-			if m.current == changelogView {
+			if m.current == changelogView || m.current == auditView {
 				m.current = detailView
 				m.viewport = viewport.New(m.width, m.height-1)
 				m.viewport.SetContent(m.readme)
@@ -458,6 +469,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case changelogMsg:
 		m.current = changelogView
+		m.viewport = viewport.New(m.width, m.height-1)
+		m.viewport.SetContent(msg.content)
+		m.ready = true
+		return m, nil
+
+	case auditMsg:
+		m.current = auditView
+		m.statusMsg = ""
 		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(msg.content)
 		m.ready = true
@@ -609,10 +628,14 @@ func (m model) View() string {
 		hint := dimStyle.Render("esc to go back")
 		return hint + "\n" + m.viewport.View()
 	}
+	if m.current == auditView {
+		hint := dimStyle.Render("esc to go back")
+		return hint + "\n" + m.viewport.View()
+	}
 	if m.current == detailView {
 		hints := "esc to go back"
 		if !m.browseMode {
-			hints += " · c changelog"
+			hints += " · c changelog · s security audit"
 		}
 		return dimStyle.Render(hints) + "\n" + m.viewport.View()
 	}
@@ -1083,6 +1106,130 @@ func pruneArchived(exts []Extension) tea.Cmd {
 	}
 }
 
+// securityPatterns defines what to scan for in extension source code.
+var securityPatterns = []struct {
+	category string
+	patterns []string // grep -E patterns
+}{
+	{"Network access", []string{
+		`net/http|net\.Dial|http\.Get|http\.Post|http\.NewRequest|websocket|grpc`,
+		`url\.Parse|net\.Listen|tls\.`,
+	}},
+	{"Command execution", []string{
+		`exec\.Command|os/exec|syscall\.Exec|syscall\.ForkExec`,
+	}},
+	{"File system writes", []string{
+		`os\.Create|os\.WriteFile|os\.MkdirAll|os\.Remove|ioutil\.WriteFile|os\.OpenFile`,
+		`io\.Copy|bufio\.NewWriter`,
+	}},
+	{"Credential / token access", []string{
+		`os\.Getenv|os\.LookupEnv|keychain|keyring|credential|\.token|api_key|secret`,
+		`\.ssh/|\.gitconfig|\.config/gh`,
+	}},
+	{"Dangerous operations", []string{
+		`unsafe\.|reflect\.|cgo|plugin\.Open`,
+		`os\.Setenv|os\.Chmod|os\.Chown`,
+	}},
+}
+
+func runSecurityAudit(ext Extension) tea.Cmd {
+	return func() tea.Msg {
+		if ext.Repo == "" {
+			return auditMsg{content: "Local extension — source not available for audit.", ext: ext}
+		}
+
+		// Clone to temp dir
+		tmpDir, err := os.MkdirTemp("", "gh-exts-audit-*")
+		if err != nil {
+			return auditMsg{content: "Failed to create temp directory: " + err.Error(), ext: ext}
+		}
+		defer os.RemoveAll(tmpDir)
+
+		cloneCmd := exec.Command("gh", "repo", "clone", ext.Repo, tmpDir, "--", "--depth=1")
+		if out, err := cloneCmd.CombinedOutput(); err != nil {
+			return auditMsg{
+				content: "Failed to clone " + ext.Repo + ":\n" + string(out),
+				ext:     ext,
+			}
+		}
+
+		// Scan for patterns
+		var findings strings.Builder
+		findings.WriteString("# Security Audit: " + ext.Repo + "\n\n")
+
+		totalFindings := 0
+		for _, cat := range securityPatterns {
+			var catFindings []string
+			for _, pat := range cat.patterns {
+				cmd := exec.Command("grep", "-rn", "-E", pat, tmpDir,
+					"--include=*.go", "--include=*.py", "--include=*.rb",
+					"--include=*.sh", "--include=*.js", "--include=*.ts")
+				out, _ := cmd.Output()
+				if len(out) > 0 {
+					for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+						if line == "" {
+							continue
+						}
+						// Strip temp dir prefix for readability
+						clean := strings.TrimPrefix(line, tmpDir+"/")
+						catFindings = append(catFindings, clean)
+					}
+				}
+			}
+			if len(catFindings) > 0 {
+				findings.WriteString("## " + cat.category + "\n\n")
+				// Deduplicate
+				seen := make(map[string]bool)
+				for _, f := range catFindings {
+					if !seen[f] {
+						seen[f] = true
+						findings.WriteString("  " + f + "\n")
+						totalFindings++
+					}
+				}
+				findings.WriteString("\n")
+			}
+		}
+
+		if totalFindings == 0 {
+			findings.WriteString("No security-relevant patterns found. This extension appears minimal.\n")
+		} else {
+			findings.WriteString(fmt.Sprintf("---\n\n**%d finding(s)** across source files.\n\n", totalFindings))
+		}
+
+		// Try to get Copilot analysis
+		hasCopilot := exec.Command("gh", "copilot", "--version").Run() == nil
+
+		if hasCopilot && totalFindings > 0 {
+			findings.WriteString("## Copilot Analysis\n\n")
+
+			// Build a concise summary of findings for Copilot
+			var summary strings.Builder
+			summary.WriteString("Analyze these security-relevant code patterns found in the GitHub CLI extension " + ext.Repo + ". ")
+			summary.WriteString("For each category, assess the risk level (low/medium/high) and whether the usage appears benign or suspicious. ")
+			summary.WriteString("Be concise.\n\n")
+			summary.WriteString(findings.String())
+
+			cmd := exec.Command("gh", "copilot", "explain", summary.String())
+			out, err := cmd.CombinedOutput()
+			if err == nil && len(out) > 0 {
+				findings.WriteString(string(out) + "\n")
+			} else {
+				findings.WriteString(dimStyle.Render("(Copilot analysis unavailable)") + "\n")
+			}
+		} else if !hasCopilot {
+			findings.WriteString(dimStyle.Render("\nInstall `gh copilot` for AI-powered analysis of these findings.") + "\n")
+		}
+
+		rendered, err := glamour.Render(findings.String(), "dark")
+		if err != nil {
+			return auditMsg{content: findings.String(), ext: ext}
+		}
+
+		return auditMsg{content: rendered, ext: ext}
+	}
+}
+
 // --- helpers ---
 
 // normalizeVersion strips a leading "v" prefix.
@@ -1267,6 +1414,7 @@ Keys (installed list):
   /        Filter
   Esc      Go back
   c        Changelog (in detail view)
+  s        Security audit (in detail view)
   q        Quit
 
 Keys (browse mode):

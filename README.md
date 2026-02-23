@@ -66,6 +66,7 @@ gh exts --export-json > exts.json    # JSON manifest
 |---------|-----------------------------------------|
 | `Enter` | View README (with repo metadata header) |
 | `c`     | View changelog (in detail view)         |
+| `s`     | Security audit (in detail view)         |
 | `u`     | Update selected extension               |
 | `U`     | Update all extensions                   |
 | `x`     | Remove selected extension (confirm)     |
@@ -90,6 +91,7 @@ gh exts --export-json > exts.json    # JSON manifest
 - **Update checks** — shows `↑v1.1` when a newer release is available
 - **Repo metadata** — detail view header shows description, stars, language, license, last updated
 - **Changelog** — press `c` to see releases newer than your installed version
+- **Security audit** — press `s` to scan extension source for security-relevant patterns (network, exec, credentials). Uses Copilot for analysis if available
 - **Manage** — update (`u`), update all (`U`), or remove (`x`) extensions without leaving the TUI
 - **Browse** — discover and install popular extensions from GitHub
 - **Direct jump** — `gh exts <name>` for instant README access
