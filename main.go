@@ -1203,22 +1203,24 @@ func runSecurityAudit(ext Extension) tea.Cmd {
 		if hasCopilot && totalFindings > 0 {
 			findings.WriteString("## Copilot Analysis\n\n")
 
-			// Build a concise summary of findings for Copilot
-			var summary strings.Builder
-			summary.WriteString("Analyze these security-relevant code patterns found in the GitHub CLI extension " + ext.Repo + ". ")
-			summary.WriteString("For each category, assess the risk level (low/medium/high) and whether the usage appears benign or suspicious. ")
-			summary.WriteString("Be concise.\n\n")
-			summary.WriteString(findings.String())
+			prompt := "Analyze these security-relevant code patterns found in the GitHub CLI extension " + ext.Repo + ". " +
+				"For each category, assess the risk level (low/medium/high) and whether the usage appears benign or suspicious. " +
+				"Be concise. Here are the findings:\n\n" + findings.String()
 
-			cmd := exec.Command("gh", "copilot", "explain", summary.String())
+			cmd := exec.Command("gh", "copilot", "-p", prompt)
 			out, err := cmd.CombinedOutput()
 			if err == nil && len(out) > 0 {
-				findings.WriteString(string(out) + "\n")
+				// Strip the usage stats line at the end
+				result := string(out)
+				if idx := strings.Index(result, "\nTotal usage est:"); idx > 0 {
+					result = result[:idx]
+				}
+				findings.WriteString(strings.TrimSpace(result) + "\n")
 			} else {
-				findings.WriteString(dimStyle.Render("(Copilot analysis unavailable)") + "\n")
+				findings.WriteString("(Copilot analysis unavailable)\n")
 			}
 		} else if !hasCopilot {
-			findings.WriteString(dimStyle.Render("\nInstall `gh copilot` for AI-powered analysis of these findings.") + "\n")
+			findings.WriteString("\n*Install `gh copilot` for AI-powered analysis of these findings.*\n")
 		}
 
 		rendered, err := glamour.Render(findings.String(), "dark")
