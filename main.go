@@ -16,7 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 // gh-native color palette
 var (
