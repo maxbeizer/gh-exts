@@ -191,6 +191,16 @@ type copilotAuditMsg struct {
 
 type errMsg struct{ err error }
 
+type spinnerTickMsg struct{}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spinnerTick() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg {
+		return spinnerTickMsg{}
+	})
+}
+
 // --- model ---
 
 type viewState int
@@ -245,12 +255,14 @@ type model struct {
 	statusMsg     string
 	confirmRemove bool
 	updating      map[string]bool // names of extensions currently being updated
-	updatingAll    bool
-	auditContent   string // raw audit markdown before Copilot
-	auditRepo      string // repo being audited, for Copilot request
-	width         int
-	height        int
-	ready         bool
+	updatingAll     bool
+	auditContent    string // raw audit markdown before Copilot
+	auditRepo       string // repo being audited, for Copilot request
+	awaitingCopilot bool
+	spinnerFrame    int
+	width           int
+	height          int
+	ready           bool
 }
 
 func (m *model) applyFilter() {
@@ -486,26 +498,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.auditContent = msg.content
 		m.auditRepo = msg.ext.Repo
 
-		// Show scan results immediately; append Copilot placeholder if available
-		display := msg.content
-		hasCopilot := exec.Command("gh", "copilot", "--version").Run() == nil
-		var cmd tea.Cmd
-		if hasCopilot && strings.Contains(msg.content, "finding(s)") {
-			display += "\n## Copilot Analysis\n\n" + yellowStyle.Render("Asking Copilot…") + "\n"
-			cmd = fetchCopilotAudit(msg.ext.Repo, msg.content)
-		}
-
-		rendered, _ := glamour.Render(display, "dark")
+		rendered, _ := glamour.Render(msg.content, "dark")
 		m.viewport = viewport.New(m.width, m.height-1)
 		m.viewport.SetContent(rendered)
 		m.ready = true
-		return m, cmd
+
+		hasCopilot := exec.Command("gh", "copilot", "--version").Run() == nil
+		if hasCopilot && strings.Contains(msg.content, "finding(s)") {
+			m.awaitingCopilot = true
+			m.spinnerFrame = 0
+			return m, tea.Batch(fetchCopilotAudit(msg.ext.Repo, msg.content), spinnerTick())
+		}
+		return m, nil
 
 	case copilotAuditMsg:
-		// Append Copilot analysis to the audit content
+		m.awaitingCopilot = false
 		display := m.auditContent + "\n## Copilot Analysis\n\n" + msg.analysis + "\n"
 		rendered, _ := glamour.Render(display, "dark")
 		m.viewport.SetContent(rendered)
+		return m, nil
+
+	case spinnerTickMsg:
+		if m.awaitingCopilot {
+			m.spinnerFrame = (m.spinnerFrame + 1) % len(spinnerFrames)
+			return m, spinnerTick()
+		}
 		return m, nil
 
 	case browseReadmeMsg:
@@ -656,6 +673,10 @@ func (m model) View() string {
 	}
 	if m.current == auditView {
 		hint := dimStyle.Render("esc to go back")
+		if m.awaitingCopilot {
+			spinner := yellowStyle.Render(spinnerFrames[m.spinnerFrame] + " Asking Copilot…")
+			hint += "  " + spinner
+		}
 		return hint + "\n" + m.viewport.View()
 	}
 	if m.current == detailView {
