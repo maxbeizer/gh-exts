@@ -185,6 +185,10 @@ type auditMsg struct {
 	ext     Extension
 }
 
+type copilotAuditMsg struct {
+	analysis string
+}
+
 type errMsg struct{ err error }
 
 // --- model ---
@@ -241,7 +245,9 @@ type model struct {
 	statusMsg     string
 	confirmRemove bool
 	updating      map[string]bool // names of extensions currently being updated
-	updatingAll   bool
+	updatingAll    bool
+	auditContent   string // raw audit markdown before Copilot
+	auditRepo      string // repo being audited, for Copilot request
 	width         int
 	height        int
 	ready         bool
@@ -477,9 +483,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case auditMsg:
 		m.current = auditView
 		m.statusMsg = ""
+		m.auditContent = msg.content
+		m.auditRepo = msg.ext.Repo
+
+		// Show scan results immediately; append Copilot placeholder if available
+		display := msg.content
+		hasCopilot := exec.Command("gh", "copilot", "--version").Run() == nil
+		var cmd tea.Cmd
+		if hasCopilot && strings.Contains(msg.content, "finding(s)") {
+			display += "\n## Copilot Analysis\n\n" + yellowStyle.Render("Asking Copilot…") + "\n"
+			cmd = fetchCopilotAudit(msg.ext.Repo, msg.content)
+		}
+
+		rendered, _ := glamour.Render(display, "dark")
 		m.viewport = viewport.New(m.width, m.height-1)
-		m.viewport.SetContent(msg.content)
+		m.viewport.SetContent(rendered)
 		m.ready = true
+		return m, cmd
+
+	case copilotAuditMsg:
+		// Append Copilot analysis to the audit content
+		display := m.auditContent + "\n## Copilot Analysis\n\n" + msg.analysis + "\n"
+		rendered, _ := glamour.Render(display, "dark")
+		m.viewport.SetContent(rendered)
 		return m, nil
 
 	case browseReadmeMsg:
@@ -1194,41 +1220,30 @@ func runSecurityAudit(ext Extension) tea.Cmd {
 		if totalFindings == 0 {
 			findings.WriteString("No security-relevant patterns found. This extension appears minimal.\n")
 		} else {
-			findings.WriteString(fmt.Sprintf("---\n\n**%d finding(s)** across source files.\n\n", totalFindings))
+			findings.WriteString(fmt.Sprintf("---\n\n**%d finding(s)** across source files.\n", totalFindings))
 		}
 
-		// Try to get Copilot analysis
-		hasCopilot := exec.Command("gh", "copilot", "--version").Run() == nil
+		return auditMsg{content: findings.String(), ext: ext}
+	}
+}
 
-		if hasCopilot && totalFindings > 0 {
-			findings.WriteString("## Copilot Analysis\n\n")
+func fetchCopilotAudit(repo, scanResults string) tea.Cmd {
+	return func() tea.Msg {
+		prompt := "Analyze these security-relevant code patterns found in the GitHub CLI extension " + repo + ". " +
+			"For each category, assess the risk level (low/medium/high) and whether the usage appears benign or suspicious. " +
+			"Be concise. Here are the findings:\n\n" + scanResults
 
-			prompt := "Analyze these security-relevant code patterns found in the GitHub CLI extension " + ext.Repo + ". " +
-				"For each category, assess the risk level (low/medium/high) and whether the usage appears benign or suspicious. " +
-				"Be concise. Here are the findings:\n\n" + findings.String()
-
-			cmd := exec.Command("gh", "copilot", "-p", prompt)
-			out, err := cmd.CombinedOutput()
-			if err == nil && len(out) > 0 {
-				// Strip the usage stats line at the end
-				result := string(out)
-				if idx := strings.Index(result, "\nTotal usage est:"); idx > 0 {
-					result = result[:idx]
-				}
-				findings.WriteString(strings.TrimSpace(result) + "\n")
-			} else {
-				findings.WriteString("(Copilot analysis unavailable)\n")
-			}
-		} else if !hasCopilot {
-			findings.WriteString("\n*Install `gh copilot` for AI-powered analysis of these findings.*\n")
+		cmd := exec.Command("gh", "copilot", "-p", prompt)
+		out, err := cmd.CombinedOutput()
+		if err != nil || len(out) == 0 {
+			return copilotAuditMsg{analysis: "(Copilot analysis unavailable)"}
 		}
 
-		rendered, err := glamour.Render(findings.String(), "dark")
-		if err != nil {
-			return auditMsg{content: findings.String(), ext: ext}
+		result := string(out)
+		if idx := strings.Index(result, "\nTotal usage est:"); idx > 0 {
+			result = result[:idx]
 		}
-
-		return auditMsg{content: rendered, ext: ext}
+		return copilotAuditMsg{analysis: strings.TrimSpace(result)}
 	}
 }
 
