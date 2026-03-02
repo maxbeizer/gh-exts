@@ -70,6 +70,7 @@ gh exts --export-json > exts.json    # JSON manifest
 | `u`     | Update selected extension               |
 | `U`     | Update all extensions                   |
 | `x`     | Remove selected extension (confirm)     |
+| `I`     | Install official version of local ext   |
 | `p`     | Prune all archived extensions            |
 | `/`     | Search / filter by name                 |
 | `Esc`   | Go back                                 |

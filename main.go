@@ -189,6 +189,18 @@ type copilotAuditMsg struct {
 	analysis string
 }
 
+type convertSearchMsg struct {
+	ext       Extension
+	candidate string // "owner/repo" of the best match, empty if none
+	err       error
+}
+
+type convertMsg struct {
+	ext  Extension
+	repo string
+	err  error
+}
+
 type errMsg struct{ err error }
 
 type spinnerTickMsg struct{}
@@ -253,7 +265,10 @@ type model struct {
 	outdatedOnly  bool
 	browseMode    bool
 	statusMsg     string
-	confirmRemove bool
+	confirmRemove    bool
+	confirmConvert   bool
+	convertCandidate string // "owner/repo" pending confirmation
+	converting       bool
 	updating      map[string]bool // names of extensions currently being updated
 	updatingAll     bool
 	auditContent    string // raw audit markdown before Copilot
@@ -342,6 +357,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.statusMsg = ""
+			return m, nil
+		}
+
+		// Confirm-convert state
+		if m.confirmConvert {
+			m.confirmConvert = false
+			if msg.String() == "I" || msg.String() == "y" {
+				if it := m.selectedItem(); it != nil && it.ext != nil {
+					m.converting = true
+					m.statusMsg = "Converting " + it.ext.Name + " → " + m.convertCandidate + "…"
+					return m, convertExtension(*it.ext, m.convertCandidate)
+				}
+			}
+			m.statusMsg = ""
+			m.convertCandidate = ""
 			return m, nil
 		}
 
@@ -450,6 +480,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.statusMsg = "Remove " + it.ext.Name + "? (x/y to confirm)"
 				}
 				return m, nil
+			}
+		case "I":
+			if m.current == listView && !m.browseMode {
+				if it := m.selectedItem(); it != nil && it.ext != nil && it.ext.Repo == "" {
+					m.statusMsg = "Searching for official " + it.ext.Name + "…"
+					return m, searchForOfficialExtension(*it.ext)
+				}
 			}
 		case "p":
 			if m.current == listView && !m.browseMode {
@@ -626,6 +663,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case convertSearchMsg:
+		if msg.err != nil {
+			m.statusMsg = redStyle.Render("✗") + " " + msg.err.Error()
+			return m, nil
+		}
+		if msg.candidate == "" {
+			m.statusMsg = dimStyle.Render("No official extension found for " + msg.ext.Name)
+			return m, nil
+		}
+		m.confirmConvert = true
+		m.convertCandidate = msg.candidate
+		m.statusMsg = "Install " + msg.candidate + " to replace local " + msg.ext.Name + "? (I/y to confirm)"
+		return m, nil
+
+	case convertMsg:
+		m.converting = false
+		m.convertCandidate = ""
+		if msg.err != nil {
+			m.statusMsg = redStyle.Render("✗") + " Convert failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.statusMsg = greenStyle.Render("✓") + " Converted to " + msg.repo
+		m.refreshExtensions()
+		return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
+
 	case errMsg:
 		m.readme = fmt.Sprintf("Error: %v", msg.err)
 		m.current = detailView
@@ -750,7 +812,12 @@ func (m model) renderList() string {
 	if m.browseMode {
 		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · i install · / filter · q quit"))
 	} else {
-		b.WriteString(dimStyle.Render("↑↓ navigate · enter view · u update · x remove · p prune · / filter · q quit"))
+		hints := "↑↓ navigate · enter view · u update · x remove · p prune"
+		if it := m.selectedItem(); it != nil && it.ext != nil && it.ext.Repo == "" {
+			hints += " · I install official"
+		}
+		hints += " · / filter · q quit"
+		b.WriteString(dimStyle.Render(hints))
 	}
 
 	return b.String()
@@ -1162,6 +1229,49 @@ func pruneArchived(exts []Extension) tea.Cmd {
 	}
 }
 
+// searchForOfficialExtension searches GitHub for a published version of a local extension.
+func searchForOfficialExtension(ext Extension) tea.Cmd {
+	return func() tea.Msg {
+		// Extract the bare name (e.g. "agent-viz" from "gh agent-viz")
+		bare := strings.TrimPrefix(ext.Name, "gh ")
+		query := fmt.Sprintf("gh-%s+topic:gh-extension", bare)
+		out, err := exec.Command("gh", "api",
+			"search/repositories?q="+query+"&sort=stars&order=desc&per_page=5").Output()
+		if err != nil {
+			return convertSearchMsg{ext: ext, err: fmt.Errorf("search failed: %w", err)}
+		}
+		var result searchResult
+		if err := json.Unmarshal(out, &result); err != nil {
+			return convertSearchMsg{ext: ext, err: fmt.Errorf("parse error: %w", err)}
+		}
+
+		// Look for an exact name match (repo name == "gh-<bare>")
+		target := "gh-" + bare
+		for _, item := range result.Items {
+			parts := strings.SplitN(item.FullName, "/", 2)
+			if len(parts) == 2 && strings.EqualFold(parts[1], target) {
+				return convertSearchMsg{ext: ext, candidate: item.FullName}
+			}
+		}
+
+		return convertSearchMsg{ext: ext}
+	}
+}
+
+// convertExtension removes a local extension and installs the official one.
+func convertExtension(ext Extension, repo string) tea.Cmd {
+	return func() tea.Msg {
+		name := extShortName(ext)
+		if out, err := exec.Command("gh", "extension", "remove", name).CombinedOutput(); err != nil {
+			return convertMsg{ext: ext, repo: repo, err: fmt.Errorf("remove failed: %s: %s", err, strings.TrimSpace(string(out)))}
+		}
+		if out, err := exec.Command("gh", "extension", "install", repo).CombinedOutput(); err != nil {
+			return convertMsg{ext: ext, repo: repo, err: fmt.Errorf("install failed: %s: %s", err, strings.TrimSpace(string(out)))}
+		}
+		return convertMsg{ext: ext, repo: repo}
+	}
+}
+
 // securityPatterns defines what to scan for in extension source code.
 var securityPatterns = []struct {
 	category string
@@ -1457,6 +1567,7 @@ Keys (installed list):
   u        Update selected extension
   U        Update all extensions
   x        Remove selected extension (with confirmation)
+  I        Install official version of local extension
   p        Prune archived extensions
   /        Filter
   Esc      Go back
