@@ -16,7 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 // gh-native color palette
 var (
@@ -172,7 +172,10 @@ type removeMsg struct {
 }
 
 type updateAllMsg struct {
-	err error
+	err     error
+	updated int
+	failed  int
+	skipped int
 }
 
 type pruneMsg struct {
@@ -465,13 +468,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.updating == nil {
 					m.updating = make(map[string]bool)
 				}
+				var remote []Extension
 				for _, ext := range m.extensions {
 					if ext.Repo != "" {
 						m.updating[ext.Name] = true
+						remote = append(remote, ext)
 					}
 				}
 				m.statusMsg = "Updating all extensions…"
-				return m, updateAllExtensions()
+				return m, updateAllExtensions(remote)
 			}
 		case "x":
 			if m.current == listView && !m.browseMode {
@@ -640,7 +645,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.statusMsg = redStyle.Render("✗") + " Update all failed: " + msg.err.Error()
 		} else {
-			m.statusMsg = greenStyle.Render("✓") + " All extensions updated"
+			parts := []string{greenStyle.Render("✓") + fmt.Sprintf(" Updated %d extension(s)", msg.updated)}
+			if msg.failed > 0 {
+				parts = append(parts, redStyle.Render(fmt.Sprintf("%d failed", msg.failed)))
+			}
+			if msg.skipped > 0 {
+				parts = append(parts, dimStyle.Render(fmt.Sprintf("%d local skipped", msg.skipped)))
+			}
+			m.statusMsg = strings.Join(parts, ", ")
 			m.refreshExtensions()
 			return m, tea.Batch(fetchHealth(m.extensions), fetchVersions(m.extensions))
 		}
@@ -1187,14 +1199,20 @@ func updateExtension(ext Extension) tea.Cmd {
 	}
 }
 
-func updateAllExtensions() tea.Cmd {
+func updateAllExtensions(extensions []Extension) tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("gh", "extension", "upgrade", "--all")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return updateAllMsg{err: fmt.Errorf("%s: %s", err, strings.TrimSpace(string(out)))}
+		var updated, failed int
+		for _, ext := range extensions {
+			name := extShortName(ext)
+			cmd := exec.Command("gh", "extension", "upgrade", name)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				_ = out
+				failed++
+			} else {
+				updated++
+			}
 		}
-		return updateAllMsg{}
+		return updateAllMsg{updated: updated, failed: failed}
 	}
 }
 
@@ -1230,32 +1248,55 @@ func pruneArchived(exts []Extension) tea.Cmd {
 }
 
 // searchForOfficialExtension searches GitHub for a published version of a local extension.
+// It tries a topic-filtered search first, then falls back to a name-only search.
 func searchForOfficialExtension(ext Extension) tea.Cmd {
 	return func() tea.Msg {
 		// Extract the bare name (e.g. "agent-viz" from "gh agent-viz")
 		bare := strings.TrimPrefix(ext.Name, "gh ")
-		query := fmt.Sprintf("gh-%s+topic:gh-extension", bare)
-		out, err := exec.Command("gh", "api",
-			"search/repositories?q="+query+"&sort=stars&order=desc&per_page=5").Output()
-		if err != nil {
+		target := "gh-" + bare
+
+		// Pass 1: search with gh-extension topic
+		if candidate, err := searchGitHub(target, bare, true); err != nil {
 			return convertSearchMsg{ext: ext, err: fmt.Errorf("search failed: %w", err)}
-		}
-		var result searchResult
-		if err := json.Unmarshal(out, &result); err != nil {
-			return convertSearchMsg{ext: ext, err: fmt.Errorf("parse error: %w", err)}
+		} else if candidate != "" {
+			return convertSearchMsg{ext: ext, candidate: candidate}
 		}
 
-		// Look for an exact name match (repo name == "gh-<bare>")
-		target := "gh-" + bare
-		for _, item := range result.Items {
-			parts := strings.SplitN(item.FullName, "/", 2)
-			if len(parts) == 2 && strings.EqualFold(parts[1], target) {
-				return convertSearchMsg{ext: ext, candidate: item.FullName}
-			}
+		// Pass 2: fallback to name-only search
+		if candidate, err := searchGitHub(target, bare, false); err != nil {
+			return convertSearchMsg{ext: ext, err: fmt.Errorf("search failed: %w", err)}
+		} else if candidate != "" {
+			return convertSearchMsg{ext: ext, candidate: candidate}
 		}
 
 		return convertSearchMsg{ext: ext}
 	}
+}
+
+// searchGitHub searches for a repository matching the extension name.
+// If withTopic is true, restricts results to repos with the gh-extension topic.
+func searchGitHub(target, bare string, withTopic bool) (string, error) {
+	query := "gh-" + bare
+	if withTopic {
+		query += "+topic:gh-extension"
+	}
+	out, err := exec.Command("gh", "api",
+		"search/repositories?q="+query+"&sort=stars&order=desc&per_page=5").Output()
+	if err != nil {
+		return "", err
+	}
+	var result searchResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return "", fmt.Errorf("parse error: %w", err)
+	}
+
+	for _, item := range result.Items {
+		parts := strings.SplitN(item.FullName, "/", 2)
+		if len(parts) == 2 && strings.EqualFold(parts[1], target) {
+			return item.FullName, nil
+		}
+	}
+	return "", nil
 }
 
 // convertExtension removes a local extension and installs the official one.
